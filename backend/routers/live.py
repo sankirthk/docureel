@@ -217,11 +217,10 @@ async def _ensure_session(job_id: str):
 
     return user_id, session_id, session
 
-
 def _build_run_config() -> RunConfig:
     return RunConfig(
         streaming_mode=StreamingMode.BIDI,
-        response_modalities=["AUDIO"],
+        response_modalities=[types.Modality.AUDIO],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         session_resumption=types.SessionResumptionConfig(),
@@ -234,8 +233,6 @@ def _build_run_config() -> RunConfig:
             language_code="en-US",
         ),
     )
-
-
 @router.websocket("/live/{job_id}")
 async def live_ws(websocket: WebSocket, job_id: str):
     print(f"[live_ws] incoming connection for job_id={job_id}")
@@ -363,6 +360,13 @@ async def live_ws(websocket: WebSocket, job_id: str):
                         if session:
                             session.state["current_scene"] = scene_text
 
+                        await safe_send_json(
+                            {
+                                "type": "scene_updated",
+                                "scene_text": scene_text,
+                            }
+                        )
+                        
                     elif msg_type == "end_turn":
                         print("[upstream] end_turn")
                         live_request_queue.send_content(

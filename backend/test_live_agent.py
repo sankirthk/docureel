@@ -22,6 +22,15 @@ async def run():
                 )
             )
 
+            # Wait until backend confirms scene state is updated
+            while True:
+                message = await ws.recv()
+                print("EVENT:", message)
+
+                payload = json.loads(message)
+                if payload.get("type") == "scene_updated":
+                    break
+
             await ws.send(
                 json.dumps(
                     {
