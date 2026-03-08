@@ -11,7 +11,7 @@ import os
 
 from google import genai
 
-GEMINI_MODEL = "publishers/google/models/gemini-3.1-pro-preview"
+GEMINI_MODEL = "publishers/google/models/gemini-2.5-pro"
 
 
 def build_client() -> genai.Client:
