@@ -47,16 +47,21 @@ Produce a script as JSON with this exact shape:
 
 Rules:
 - One scene per key_section, same order, matching section_id
-- Total words across hook + all narration + outro: 75-150 words
+- Total words across hook + all narration + outro: 75-110 words maximum
 - Use the actual numbers and stats from the manifest — never vague
 - No rhetorical questions. No "but here's the thing". No "let that sink in".
 - No exclamation points. No emojis in narration.
 - Active voice. Short sentences. Concrete nouns.
 - Tone per scene must match both the section content and overall sentiment: {sentiment}
+- Each narration must have a connective arc: state the finding, then explain the tension or contradiction, then land the implication. Never list facts side by side without connecting them causally.
+- Captions must capture the counterintuitive twist of the scene, not just restate the stat. A good caption makes someone stop scrolling.
 - Return ONLY valid JSON. No markdown fences. No explanation.
 
-Bad narration: "Revenue TANKED this quarter and here's why that matters!"
-Good narration: "Revenue fell 8% year over year — the steepest single-quarter drop since 2019, driven almost entirely by a 23% contraction in North American enterprise sales."
+Bad narration: "Pipelining impact is non-linear and kernel-dependent. Aggressive prefetching improved attention throughput by 8.7 percent but slowed compute-bound kernels by 13 percent due to instruction fetch overhead."
+Good narration: "Pipelining helps and hurts simultaneously. The same aggressive prefetching that boosted attention throughput 8.7% actively stalled compute-bound kernels — instruction fetch overhead ate the gains."
+
+Bad caption: "97% bandwidth collapse in fused kernels"
+Good caption: "More fusion ≠ faster inference"
 """
 
 
