@@ -1,8 +1,11 @@
 """
 End-to-end pipeline test: PDF → Parser + KnowledgeBase (parallel) → NarrativeScript
 
-Runs the real Gemini calls in the same order as the production pipeline
-without starting the server. Prints all outputs with clear section headers.
+Parser and KnowledgeBase fire concurrently via asyncio.to_thread (Gemini calls
+are synchronous/blocking — to_thread offloads them to a thread pool so the event
+loop stays free and both run at the same time).
+
+Narration starts immediately after Parser finishes, without waiting for KnowledgeBase.
 
 Usage:
   cd backend
@@ -37,7 +40,8 @@ def _divider(title: str):
 async def run_parser(pdf_bytes: bytes, client) -> Manifest:
     _divider("STEP 1a: ParserAgent")
     print("Sending PDF to Gemini (manifest extraction)...")
-    raw = _parse_with_gemini(pdf_bytes, client)
+    # Offload blocking sync call to thread pool so KB can run concurrently
+    raw = await asyncio.to_thread(_parse_with_gemini, pdf_bytes, client)
     manifest = Manifest.model_validate(raw)
     print(f"✓ Manifest valid")
     print(f"  Title:     {manifest.title}")
@@ -52,9 +56,8 @@ async def run_parser(pdf_bytes: bytes, client) -> Manifest:
     return manifest
 
 
-async def run_knowledge_base(pdf_bytes: bytes, client) -> KnowledgeBase:
-    _divider("STEP 1b: KnowledgeBaseAgent (parallel with Parser)")
-    print("Sending PDF to Gemini (deep knowledge extraction)...")
+def _kb_generate(pdf_bytes: bytes, client) -> KnowledgeBase:
+    """Blocking KB generation — called via to_thread."""
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=[
@@ -63,7 +66,14 @@ async def run_knowledge_base(pdf_bytes: bytes, client) -> KnowledgeBase:
         ],
     )
     raw = kb_extract_json(response.text)
-    kb = KnowledgeBase.model_validate(raw)
+    return KnowledgeBase.model_validate(raw)
+
+
+async def run_knowledge_base(pdf_bytes: bytes, client) -> KnowledgeBase:
+    _divider("STEP 1b: KnowledgeBaseAgent (concurrent with Parser)")
+    print("Sending PDF to Gemini (deep knowledge extraction)...")
+    # Offload blocking sync call to thread pool
+    kb = await asyncio.to_thread(_kb_generate, pdf_bytes, client)
     print(f"✓ Knowledge base valid")
     print(f"  Deep findings:    {len(kb.deep_findings)}")
     print(f"  Key facts:        {len(kb.key_facts)}")
@@ -74,9 +84,8 @@ async def run_knowledge_base(pdf_bytes: bytes, client) -> KnowledgeBase:
     return kb
 
 
-async def run_narrative_script(manifest: Manifest, client) -> NarrationScript:
-    _divider("STEP 2: NarrativeScriptAgent")
-    print("Sending manifest to Gemini Flash (script generation)...")
+def _narration_generate(manifest: Manifest, client) -> NarrationScript:
+    """Blocking narration generation — called via to_thread."""
     prompt = PROMPT_TEMPLATE.format(
         manifest_json=json.dumps(manifest.model_dump(), indent=2),
         sentiment=manifest.sentiment,
@@ -86,7 +95,14 @@ async def run_narrative_script(manifest: Manifest, client) -> NarrationScript:
         contents=[prompt],
     )
     raw = ns_extract_json(response.text)
-    script = NarrationScript.model_validate(raw)
+    return NarrationScript.model_validate(raw)
+
+
+async def run_narrative_script(manifest: Manifest, client) -> NarrationScript:
+    _divider("STEP 2: NarrativeScriptAgent")
+    print("Sending manifest to Gemini Flash (script generation)...")
+    # Offload blocking sync call to thread pool
+    script = await asyncio.to_thread(_narration_generate, manifest, client)
     total_words = (
         len(script.hook.split())
         + sum(len(s.narration.split()) for s in script.scenes)
@@ -112,20 +128,22 @@ async def main(pdf_path: str):
 
     client = build_client()
 
-    # KnowledgeBase runs in the background — narration doesn't need it
+    # KB fires immediately as a background task — runs in its own thread
     kb_task = asyncio.create_task(run_knowledge_base(pdf_bytes, client))
 
-    # Parser runs first; narration starts immediately after it finishes
+    # Parser runs concurrently with KB (both in thread pool via to_thread)
     manifest = await run_parser(pdf_bytes, client)
+
+    # Narration starts as soon as parser is done — doesn't wait for KB
     script = await run_narrative_script(manifest, client)
 
-    # Now collect KB result (likely already done by the time we get here)
+    # KB is likely already done; collect it
     kb = await kb_task
 
     _divider("DONE")
-    print(f"  Manifest sections:   {len(manifest.key_sections)}")
-    print(f"  Knowledge base facts:{len(kb.key_facts)}")
-    print(f"  Script scenes:       {len(script.scenes)}")
+    print(f"  Manifest sections:    {len(manifest.key_sections)}")
+    print(f"  Knowledge base facts: {len(kb.key_facts)}")
+    print(f"  Script scenes:        {len(script.scenes)}")
     print()
 
 
