@@ -5,7 +5,7 @@ OUT: session["narration_script"]  — NarrationScript dict { hook, scenes, outro
 
 Reads the full manifest JSON and produces a TikTok-style video script.
 One scene per key_section, targeting 30-60 seconds total narration (~75-150 words).
-Model: uses GEMINI_MODEL from tools/gemini.py (swap to Flash for faster/cheaper runs)
+Model: Gemini 3 Flash (publishers/google/models/gemini-3-flash-preview)
 """
 
 import json
@@ -18,7 +18,7 @@ from google.adk.events import Event
 from pydantic import ValidationError
 
 from models.narration_script import NarrationScript
-from tools.gemini import build_client, GEMINI_MODEL
+from tools.gemini import build_client, GEMINI_FLASH_MODEL
 from tools.job_store import update_job
 
 PROMPT_TEMPLATE = """
@@ -81,7 +81,7 @@ class NarrativeScriptAgent(BaseAgent):
 
         client = build_client()
         response = client.models.generate_content(
-            model=GEMINI_MODEL,
+            model=GEMINI_FLASH_MODEL,
             contents=[prompt],
         )
 
