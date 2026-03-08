@@ -1,14 +1,44 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { UploadCloud, FileText, Mic, Play, Pause, Loader2 } from "lucide-react";
+
+// HTTP calls go through Next.js rewrite proxy (/api/* → backend).
+// WebSocket must use the backend directly (Next.js doesn't proxy WS).
+const WS_BASE =
+  process.env.NEXT_PUBLIC_WS_URL ??
+  (typeof window !== "undefined"
+    ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.hostname}:8080`
+    : "ws://localhost:8080");
+
+const STEP_LABELS: Record<string, string> = {
+  queued:       "Queued — waiting to start...",
+  parsing:      "Reading your PDF...",
+  scripting:    "Writing narration script...",
+  tts:          "Generating voiceover...",
+  video_script: "Writing video directions...",
+  veo:          "Rendering clips with Veo (this takes a while)...",
+  stitching:    "Stitching clips together...",
+  complete:     "Wrapping up...",
+};
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<"idle" | "processing" | "done" | "error">("idle");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [transcript, setTranscript] = useState<string>("");
+  const [pipelineStep, setPipelineStep] = useState<string>("");
+  const [errorMsg, setErrorMsg] = useState<string>("");
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -16,23 +46,160 @@ export default function Home() {
     }
   };
 
-  const handleUpload = () => {
+  // ── Upload ──────────────────────────────────────────────────────────────────
+  const handleUpload = async () => {
     if (!file) return;
     setIsUploading(true);
     setJobStatus("processing");
-    
-    // TODO: Implement actual API call to /api/generate
-    setTimeout(() => {
+    setPipelineStep("queued");
+    setErrorMsg("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/generate", { method: "POST", body: formData });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const { job_id } = await res.json();
+      setIsUploading(false); // upload done, pipeline now running
+      setJobId(job_id);
+    } catch (err) {
+      console.error("[upload]", err);
+      setErrorMsg(err instanceof Error ? err.message : "Upload failed.");
+      setJobStatus("error");
       setIsUploading(false);
-      setJobStatus("done");
-      // Dummy video for placeholder purposes
-      setVideoUrl("https://www.w3schools.com/html/mov_bbb.mp4");
-    }, 3000);
+    }
   };
 
-  const handleMicToggle = () => {
-    setIsRecording(!isRecording);
-    // TODO: Implement LiveAgent WebSocket connection handling
+  // ── Status polling ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!jobId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/status/${jobId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        if (data.status === "done") {
+          setVideoUrl(data.video_url);
+          setJobStatus("done");
+          setIsUploading(false);
+          clearInterval(interval);
+        } else if (data.status === "error") {
+          setJobStatus("error");
+          setErrorMsg(data.error ?? "An unknown error occurred.");
+          setIsUploading(false);
+          clearInterval(interval);
+        } else {
+          setPipelineStep(data.step ?? "");
+        }
+      } catch (err) {
+        console.error("[poll]", err);
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [jobId]);
+
+  // ── WebSocket ────────────────────────────────────────────────────────────────
+  const stopMic = useCallback(() => {
+    processorRef.current?.disconnect();
+    processorRef.current = null;
+    sourceRef.current?.disconnect();
+    sourceRef.current = null;
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    audioCtxRef.current?.close();
+    audioCtxRef.current = null;
+  }, []);
+
+  const openWebSocket = useCallback(() => {
+    if (wsRef.current || !jobId) return;
+
+    const ws = new WebSocket(`${WS_BASE}/api/live/${jobId}`);
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => console.log("[ws] connected");
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data as string);
+        if (data.type === "transcript" && data.text) {
+          setTranscript(data.text);
+          if (data.text.toLowerCase().includes("resuming now")) {
+            videoRef.current?.play();
+            stopMic();
+            setIsRecording(false);
+          }
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    ws.onclose = () => {
+      wsRef.current = null;
+      console.log("[ws] closed");
+    };
+
+    ws.onerror = (e) => console.error("[ws] error", e);
+
+    wsRef.current = ws;
+  }, [jobId, stopMic]);
+
+  // Clean up WS + mic on unmount
+  useEffect(() => {
+    return () => {
+      wsRef.current?.close();
+      stopMic();
+    };
+  }, [stopMic]);
+
+  // ── Mic ─────────────────────────────────────────────────────────────────────
+  const startMic = async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    streamRef.current = stream;
+
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    audioCtxRef.current = ctx;
+
+    const source = ctx.createMediaStreamSource(stream);
+    sourceRef.current = source;
+
+    // ScriptProcessorNode: 4096 samples, mono input, mono output
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    processorRef.current = processor;
+
+    source.connect(processor);
+    processor.connect(ctx.destination);
+
+    processor.onaudioprocess = (e) => {
+      const float32 = e.inputBuffer.getChannelData(0);
+      const int16 = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
+      }
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(int16.buffer);
+      }
+    };
+  };
+
+  const handleMicToggle = async () => {
+    if (isRecording) {
+      stopMic();
+      setIsRecording(false);
+      videoRef.current?.play();
+    } else {
+      videoRef.current?.pause();
+      try {
+        await startMic();
+        setIsRecording(true);
+      } catch (err) {
+        console.error("[mic] getUserMedia failed:", err);
+        videoRef.current?.play();
+      }
+    }
   };
 
   return (
@@ -56,7 +223,7 @@ export default function Home() {
 
       {/* Main Content */}
       <main className="mx-auto max-w-6xl p-6 lg:p-12 grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-24 items-center min-h-[calc(100vh-88px)]">
-        
+
         {/* Left Column: Upload & Status */}
         <div className="flex flex-col gap-8">
           <div className="space-y-4">
@@ -72,7 +239,7 @@ export default function Home() {
           <div className="bg-zinc-900 border border-white/10 rounded-2xl p-6 shadow-2xl relative overflow-hidden group">
             {/* Ambient glow */}
             <div className="absolute inset-0 bg-gradient-to-br from-purple-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-            
+
             <div className="relative flex flex-col items-center justify-center border-2 border-dashed border-zinc-700/50 rounded-xl p-10 text-center hover:border-purple-500/50 transition-colors">
               <UploadCloud className="w-12 h-12 text-zinc-500 mb-4" />
               <h3 className="text-lg font-medium text-zinc-200 mb-2">
@@ -81,13 +248,13 @@ export default function Home() {
               <p className="text-sm text-zinc-500 mb-6">
                 Limit 50MB. PDF only.
               </p>
-              
+
               <label className="cursor-pointer bg-white text-black px-6 py-2.5 rounded-full font-semibold hover:bg-zinc-200 transition-colors shadow-lg shadow-white/10 text-sm">
                 Browse Files
-                <input 
-                  type="file" 
+                <input
+                  type="file"
                   accept="application/pdf"
-                  className="hidden" 
+                  className="hidden"
                   onChange={handleFileChange}
                 />
               </label>
@@ -102,15 +269,20 @@ export default function Home() {
               )}
             </div>
 
-            <button 
+            <button
               onClick={handleUpload}
-              disabled={!file || isUploading}
+              disabled={!file || isUploading || jobStatus === "processing"}
               className="mt-4 w-full bg-purple-600 hover:bg-purple-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-bold py-3.5 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 group/btn"
             >
               {isUploading ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  Processing...
+                  Uploading...
+                </>
+              ) : jobStatus === "processing" ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Generating...
                 </>
               ) : (
                 <>
@@ -120,20 +292,56 @@ export default function Home() {
               )}
             </button>
           </div>
-          
+
           {/* Status Tracker */}
           {jobStatus !== "idle" && (
-            <div className="bg-zinc-900/50 border border-white/5 rounded-xl p-5">
+            <div className={`border rounded-xl p-5 space-y-3 ${
+              jobStatus === "error"
+                ? "bg-red-950/30 border-red-500/20"
+                : "bg-zinc-900/50 border-white/5"
+            }`}>
+              {/* Row 1: upload status */}
               <div className="flex items-center gap-3">
-                {jobStatus === "processing" ? (
-                  <div className="w-3 h-3 bg-yellow-500 rounded-full animate-pulse" />
+                {isUploading ? (
+                  <Loader2 className="w-4 h-4 text-yellow-400 animate-spin shrink-0" />
+                ) : jobStatus === "error" && !jobId ? (
+                  <div className="w-3 h-3 bg-red-500 rounded-full shrink-0" />
                 ) : (
-                  <div className="w-3 h-3 bg-green-500 rounded-full" />
+                  <div className="w-3 h-3 bg-green-500 rounded-full shrink-0" />
                 )}
                 <span className="text-sm font-medium text-zinc-300">
-                  {jobStatus === "processing" ? "Agent pipeline running..." : "Generation complete"}
+                  {isUploading
+                    ? "Uploading PDF..."
+                    : jobStatus === "error" && !jobId
+                    ? "Upload failed"
+                    : "PDF uploaded successfully"}
                 </span>
               </div>
+
+              {/* Row 2: pipeline status (only once upload succeeded) */}
+              {jobId && (
+                <div className="flex items-start gap-3">
+                  {jobStatus === "processing" ? (
+                    <Loader2 className="w-4 h-4 text-yellow-400 animate-spin mt-0.5 shrink-0" />
+                  ) : jobStatus === "error" ? (
+                    <div className="w-3 h-3 bg-red-500 rounded-full mt-1 shrink-0" />
+                  ) : (
+                    <div className="w-3 h-3 bg-green-500 rounded-full mt-1 shrink-0" />
+                  )}
+                  <div className="flex flex-col gap-1 min-w-0">
+                    <span className="text-sm font-medium text-zinc-300">
+                      {jobStatus === "processing"
+                        ? STEP_LABELS[pipelineStep] ?? "Starting pipeline..."
+                        : jobStatus === "error"
+                        ? "Generation failed"
+                        : "Video ready"}
+                    </span>
+                    {jobStatus === "error" && errorMsg && (
+                      <span className="text-xs text-red-400 break-words">{errorMsg}</span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -142,14 +350,22 @@ export default function Home() {
         <div className="flex justify-center lg:justify-end perspective-1000">
           <div className="relative w-full max-w-[340px] aspect-[9/16] bg-black rounded-[2.5rem] border-[8px] border-zinc-900 shadow-2xl overflow-hidden ring-1 ring-white/10">
             {videoUrl ? (
-              <video 
-                src={videoUrl} 
-                className="w-full h-full object-cover" 
-                controls 
-                autoPlay 
-                loop 
+              <video
+                ref={videoRef}
+                src={videoUrl}
+                className="w-full h-full object-cover"
+                controls
+                autoPlay
+                loop
                 playsInline
+                onPlay={openWebSocket}
               />
+            ) : jobStatus === "processing" ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-zinc-950">
+                <Loader2 className="w-10 h-10 text-purple-500 animate-spin mb-4" />
+                <p className="text-sm font-semibold text-zinc-300">Generating your video…</p>
+                <p className="text-xs text-zinc-500 mt-1">This takes a few minutes</p>
+              </div>
             ) : (
               <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-zinc-950">
                 <div className="w-16 h-16 rounded-full bg-zinc-900 border border-white/5 flex items-center justify-center mb-6 shadow-inner">
@@ -164,11 +380,11 @@ export default function Home() {
             {/* Live Q&A Mic Overlay */}
             {jobStatus === "done" && (
               <div className="absolute bottom-24 right-4 flex flex-col gap-4">
-                <button 
+                <button
                   onClick={handleMicToggle}
                   className={`p-4 rounded-full shadow-2xl backdrop-blur-md transition-all ${
-                    isRecording 
-                      ? "bg-red-500/90 text-white animate-pulse shadow-red-500/50 scale-110" 
+                    isRecording
+                      ? "bg-red-500/90 text-white animate-pulse shadow-red-500/50 scale-110"
                       : "bg-black/60 text-white hover:bg-black border border-white/20"
                   }`}
                 >
@@ -176,11 +392,21 @@ export default function Home() {
                 </button>
               </div>
             )}
-            
+
+            {/* Listening indicator */}
             {isRecording && (
               <div className="absolute bottom-8 left-0 right-0 px-6 text-center">
                 <div className="bg-black/80 backdrop-blur-md px-4 py-2 rounded-full border border-red-500/30 text-xs font-semibold text-red-400 inline-block shadow-lg">
                   Listening... Video Paused
+                </div>
+              </div>
+            )}
+
+            {/* Transcript display */}
+            {transcript && !isRecording && (
+              <div className="absolute bottom-8 left-0 right-0 px-4 text-center">
+                <div className="bg-black/80 backdrop-blur-md px-4 py-3 rounded-xl border border-white/10 text-xs text-zinc-200 shadow-lg text-left leading-relaxed">
+                  {transcript}
                 </div>
               </div>
             )}

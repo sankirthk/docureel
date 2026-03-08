@@ -35,6 +35,19 @@ def build_client() -> genai.Client:
     )
 
 
+def build_veo_client() -> genai.Client:
+    """
+    Veo's PredictLongRunning endpoint requires a project + location — Express
+    Mode (API key only) does not carry a project reference and returns
+    RESOURCE_PROJECT_INVALID.  Always use ADC / explicit project credentials.
+    """
+    return genai.Client(
+        vertexai=True,
+        project=os.getenv("GOOGLE_CLOUD_PROJECT"),
+        location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
+    )
+
+
 def generate_with_retry(client: genai.Client, model: str, contents) -> types.GenerateContentResponse:
     """
     Call client.models.generate_content with exponential backoff on 429s.

@@ -22,6 +22,7 @@ from pydantic import ValidationError
 
 from models.knowledge_base import KnowledgeBase
 from tools.gemini import build_client, GEMINI_MODEL, generate_with_retry
+from tools.storage import read_bytes
 from tools.job_store import update_job
 
 PROMPT = """
@@ -70,10 +71,12 @@ class KnowledgeBaseAgent(BaseAgent):
         job_id = ctx.session.state["job_id"]
         file_path = ctx.session.state["file_path"]
 
-        with open(file_path, "rb") as f:
-            pdf_bytes = f.read()
+        print(f"\n[KnowledgeBaseAgent] ▶ Starting", flush=True)
+        pdf_bytes = read_bytes(file_path)
+        print(f"[KnowledgeBaseAgent]   PDF read: {len(pdf_bytes):,} bytes from {file_path!r}", flush=True)
 
         client = build_client()
+        print(f"[KnowledgeBaseAgent]   Sending PDF to Gemini...", flush=True)
 
         response = generate_with_retry(
             client,
@@ -84,13 +87,16 @@ class KnowledgeBaseAgent(BaseAgent):
             ],
         )
 
+        print(f"[KnowledgeBaseAgent]   Gemini responded, validating...", flush=True)
         raw = _extract_json(response.text)
 
         try:
             kb = KnowledgeBase.model_validate(raw)
         except ValidationError as e:
+            print(f"[KnowledgeBaseAgent] ❌ Validation failed: {e}", flush=True)
             raise ValueError(f"KnowledgeBaseAgent: validation failed:\n{e}") from e
 
+        print(f"[KnowledgeBaseAgent] ✅ Done — {len(kb.deep_findings)} findings, {len(kb.key_facts)} facts, {len(kb.definitions)} definitions", flush=True)
         ctx.session.state["knowledge_base"] = kb.model_dump()
         update_job(job_id, knowledge_base=kb.model_dump())
 

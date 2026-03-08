@@ -21,15 +21,14 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
 
-from tools.storage import save_upload, get_signed_url, DEV_MODE
+from tools.storage import save_upload, get_signed_url, DEV_MODE, build_gcs_client
 from tools.job_store import update_job
 
 
 def _download_clip(clip_path: str, dest: Path) -> None:
     """Copy from local path or download from GCS to dest."""
     if clip_path.startswith("gs://"):
-        from google.cloud import storage as gcs
-        client = gcs.Client()
+        client = build_gcs_client()
         without_prefix = clip_path.removeprefix("gs://")
         bucket_name, blob_path = without_prefix.split("/", 1)
         client.bucket(bucket_name).blob(blob_path).download_to_filename(str(dest))
@@ -149,6 +148,9 @@ class StitcherAgent(BaseAgent):
         clips = ctx.session.state["veo_clips"]
 
         update_job(job_id, step="stitching")
+        print(f"\n[StitcherAgent] ▶ Starting — {len(clips)} clips to stitch", flush=True)
+        for c in clips:
+            print(f"  clip {c['scene_id']:2d}: {c['clip_path']}", flush=True)
 
         # Run ffmpeg work in thread pool — subprocess calls block the event loop
         final_uri = await asyncio.to_thread(_stitch, clips, job_id)
@@ -157,6 +159,7 @@ class StitcherAgent(BaseAgent):
         if not DEV_MODE and final_uri.startswith("gs://"):
             final_uri = get_signed_url(final_uri)
 
+        print(f"[StitcherAgent] ✅ Done — final_uri: {final_uri}", flush=True)
         ctx.session.state["final_video_uri"] = final_uri
         update_job(job_id, step="complete", final_video_uri=final_uri)
 

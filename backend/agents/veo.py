@@ -17,17 +17,30 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
 
-from tools.gemini import build_client, VEO_MODEL
-from tools.storage import save_upload
+from tools.gemini import build_veo_client, VEO_MODEL
+from tools.storage import save_upload, build_gcs_client
 from tools.job_store import update_job
 
 POLL_INTERVAL = 15  # seconds between operation status checks
 
 
 def _load_avatar(path: str) -> types.Image | None:
-    """Load avatar image bytes from local path. Returns None if path missing."""
+    """Load avatar image bytes from local path or GCS URI. Returns None if missing."""
     if not path:
         return None
+    if path.startswith("gs://"):
+        try:
+            # gs://bucket/object/path
+            without_scheme = path[5:]
+            bucket_name, _, blob_name = without_scheme.partition("/")
+            client = build_gcs_client()
+            bucket = client.bucket(bucket_name)
+            blob = bucket.blob(blob_name)
+            image_bytes = blob.download_as_bytes()
+            return types.Image(image_bytes=image_bytes, mime_type="image/jpeg")
+        except Exception as e:
+            print(f"  [VeoAgent] Warning: could not download avatar from {path}: {e}")
+            return None
     p = Path(path)
     if not p.exists():
         print(f"  [VeoAgent] Warning: avatar not found at {path}")
@@ -65,24 +78,36 @@ def _generate_clip(client, scene: dict, avatar_image: types.Image | None) -> byt
     if is_presenter and scene.get("dialogue"):
         prompt = f'{prompt}\n\nSpoken dialogue: "{scene["dialogue"]}"'
 
+    print(f"    [Veo] Submitting generation request for scene {scene['scene_id']} ({scene['type']}, {scene['duration_seconds']}s)...", flush=True)
     operation = client.models.generate_videos(
         model=VEO_MODEL,
         prompt=prompt,
         config=config,
     )
+    print(f"    [Veo] Operation started: {getattr(operation, 'name', '?')}", flush=True)
 
     # Poll until the operation completes
+    poll_count = 0
     while not operation.done:
         time.sleep(POLL_INTERVAL)
+        poll_count += 1
         operation = client.operations.get(operation)
+        print(f"    [Veo] Polling ({poll_count * POLL_INTERVAL}s elapsed) done={operation.done}", flush=True)
 
     if operation.error:
+        print(f"    [Veo] ❌ Generation error: {operation.error}", flush=True)
         raise RuntimeError(f"Veo generation failed for scene {scene['scene_id']}: {operation.error}")
 
-    # Download the generated video bytes
+    # Download the generated video bytes.
+    # Vertex AI client does not support client.files.download() — the video is
+    # stored in GCS and must be fetched via the storage client using its URI.
     generated_video = operation.result.generated_videos[0]
-    video_bytes = client.files.download(file=generated_video.video)
-    return bytes(video_bytes)
+    video_uri = generated_video.video.uri  # gs://bucket/path/to/clip.mp4
+    gcs = build_gcs_client()
+    without_prefix = video_uri.removeprefix("gs://")
+    bucket_name, blob_path = without_prefix.split("/", 1)
+    video_bytes = gcs.bucket(bucket_name).blob(blob_path).download_as_bytes()
+    return video_bytes
 
 
 class VeoAgent(BaseAgent):
@@ -91,13 +116,17 @@ class VeoAgent(BaseAgent):
         video_script = ctx.session.state["video_script"]
 
         update_job(job_id, step="veo")
-
         scenes = video_script["scenes"]
-        client = build_client()
+        print(f"\n[VeoAgent] ▶ Starting — {len(scenes)} scenes to generate", flush=True)
+        print(f"[VeoAgent]   avatar_male_path={video_script.get('avatar_male_path')!r}", flush=True)
+        print(f"[VeoAgent]   avatar_female_path={video_script.get('avatar_female_path')!r}", flush=True)
+
+        client = build_veo_client()
 
         # Load avatar images once — reused across all presenter scenes
         avatar_male = _load_avatar(video_script.get("avatar_male_path", ""))
         avatar_female = _load_avatar(video_script.get("avatar_female_path", ""))
+        print(f"[VeoAgent]   avatar_male loaded={avatar_male is not None}  avatar_female loaded={avatar_female is not None}", flush=True)
 
         clips = []
         for scene in scenes:
@@ -108,10 +137,12 @@ class VeoAgent(BaseAgent):
             if is_presenter:
                 avatar_img = avatar_male if scene.get("avatar") == "male" else avatar_female
 
-            print(f"  [VeoAgent] Generating scene {scene_id} ({scene['type']}, {scene['duration_seconds']}s)...")
+            print(f"[VeoAgent]   scene {scene_id}/{len(scenes)}: type={scene['type']!r}  duration={scene['duration_seconds']}s  caption={scene.get('caption')!r}", flush=True)
+            print(f"[VeoAgent]   prompt: {scene['prompt'][:100]}...", flush=True)
 
             # Offload blocking generation + polling to thread pool
             video_bytes = await asyncio.to_thread(_generate_clip, client, scene, avatar_img)
+            print(f"[VeoAgent]   scene {scene_id} ✅ downloaded {len(video_bytes):,} bytes", flush=True)
 
             clip_path = save_upload(job_id, f"clip_{scene_id:02d}.mp4", video_bytes)
             clips.append({

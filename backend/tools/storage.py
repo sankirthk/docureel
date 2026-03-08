@@ -14,6 +14,22 @@ GCS_BUCKET = os.getenv("GCS_BUCKET", "nevertrtfm")
 LOCAL_ROOT = Path(__file__).parent.parent / "local_storage"
 
 
+def read_bytes(uri: str) -> bytes:
+    """Read bytes from a local path or a gs:// URI."""
+    if uri.startswith("gs://"):
+        client = build_gcs_client()
+        without_prefix = uri.removeprefix("gs://")
+        bucket_name, blob_path = without_prefix.split("/", 1)
+        return client.bucket(bucket_name).blob(blob_path).download_as_bytes()
+    with open(uri, "rb") as f:
+        return f.read()
+
+
+def build_gcs_client():
+    from google.cloud import storage
+    return storage.Client(project=os.getenv("GOOGLE_CLOUD_PROJECT"))
+
+
 def save_upload(job_id: str, filename: str, data: bytes) -> str:
     """Save job-scoped bytes and return a URI (local path or gs://)."""
     if DEV_MODE:
@@ -37,8 +53,7 @@ def save_shared(path: str, data: bytes) -> str:
         dest.write_bytes(data)
         return str(dest)
     else:
-        from google.cloud import storage as gcs
-        client = gcs.Client()
+        client = build_gcs_client()
         bucket = client.bucket(GCS_BUCKET)
         blob = bucket.blob(f"shared/{path}")
         blob.upload_from_string(data)
@@ -55,9 +70,7 @@ def get_uri(job_id: str, filename: str) -> str:
 
 def get_signed_url(gcs_uri: str) -> str:
     """Return a signed HTTPS URL for a GCS object (prod only)."""
-    from google.cloud import storage
-
-    client = storage.Client()
+    client = build_gcs_client()
     # gcs_uri format: gs://bucket/path/to/file
     without_prefix = gcs_uri.removeprefix("gs://")
     bucket_name, blob_path = without_prefix.split("/", 1)
@@ -67,9 +80,7 @@ def get_signed_url(gcs_uri: str) -> str:
 
 
 def _gcs_upload(job_id: str, filename: str, data: bytes) -> str:
-    from google.cloud import storage
-
-    client = storage.Client()
+    client = build_gcs_client()
     bucket = client.bucket(GCS_BUCKET)
     blob = bucket.blob(f"{job_id}/{filename}")
     blob.upload_from_string(data)

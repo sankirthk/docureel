@@ -36,6 +36,8 @@ pipeline = SequentialAgent(
 async def run_pipeline(job_id: str, file_path: str):
     """Entry point called by the FastAPI background task."""
     try:
+        print(f"\n[pipeline] ▶ Starting pipeline for job {job_id}", flush=True)
+        print(f"[pipeline]   file: {file_path}", flush=True)
         update_job(job_id, status="processing", step="parsing")
 
         session_service = InMemorySessionService()
@@ -77,18 +79,24 @@ async def run_pipeline(job_id: str, file_path: str):
         )
         state = final_session.state
 
+        final_uri = state.get("final_video_uri")
+        print(f"\n[pipeline] ✅ Pipeline complete for job {job_id}", flush=True)
+        print(f"[pipeline]   final_video_uri: {final_uri}", flush=True)
         update_job(
             job_id,
             status="done",
             step="complete",
-            video_url=state.get("final_video_uri"),
+            video_url=final_uri,
             manifest=state.get("manifest"),
             knowledge_base=state.get("knowledge_base"),
             veo_clips=state.get("veo_clips"),
-            final_video_uri=state.get("final_video_uri"),
+            final_video_uri=final_uri,
         )
 
     except Exception as e:
+        print(f"\n[pipeline] ❌ Pipeline FAILED for job {job_id}", flush=True)
+        print(f"[pipeline]   error: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
         update_job(
             job_id,
             status="error",

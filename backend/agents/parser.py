@@ -30,6 +30,7 @@ from pydantic import ValidationError
 
 from models.manifest import Manifest
 from tools.gemini import build_client, GEMINI_MODEL, generate_with_retry
+from tools.storage import read_bytes
 from tools.job_store import update_job
 
 MANIFEST_PROMPT = """
@@ -185,22 +186,27 @@ class ParserAgent(BaseAgent):
         backend = os.getenv("PARSER_BACKEND", "gemini").lower()
 
         update_job(job_id, step="parsing")
+        print(f"\n[ParserAgent] ▶ Starting — backend={backend!r}", flush=True)
 
-        with open(file_path, "rb") as f:
-            pdf_bytes = f.read()
+        pdf_bytes = read_bytes(file_path)
+        print(f"[ParserAgent]   PDF read: {len(pdf_bytes):,} bytes from {file_path!r}", flush=True)
 
         client = build_client()
+        print(f"[ParserAgent]   Sending PDF to Gemini...", flush=True)
 
         if backend == "documentai":
             raw = _parse_with_documentai(pdf_bytes, client)
         else:
             raw = _parse_with_gemini(pdf_bytes, client)
 
+        print(f"[ParserAgent]   Gemini responded, validating manifest...", flush=True)
         try:
             manifest = Manifest.model_validate(raw)
         except ValidationError as e:
+            print(f"[ParserAgent] ❌ Manifest validation failed: {e}", flush=True)
             raise ValueError(f"ParserAgent: manifest validation failed:\n{e}") from e
 
+        print(f"[ParserAgent] ✅ Done — title={manifest.title!r}, sections={len(manifest.key_sections)}, sentiment={manifest.sentiment}", flush=True)
         ctx.session.state["manifest"] = manifest.model_dump()
 
         # Write to job store now so LiveAgent can load it before the full pipeline finishes

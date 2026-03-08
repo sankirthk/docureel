@@ -143,6 +143,7 @@ class VideoScriptAgent(BaseAgent):
         manifest = ctx.session.state["manifest"]
 
         update_job(job_id, step="video_script")
+        print(f"\n[VideoScriptAgent] ▶ Starting — title={manifest.get('title')!r}", flush=True)
 
         prompt = VIDEO_SCRIPT_PROMPT.format(
             title=manifest["title"],
@@ -154,8 +155,10 @@ class VideoScriptAgent(BaseAgent):
         )
 
         client = build_client()
+        print(f"[VideoScriptAgent]   Calling Gemini for scene directions...", flush=True)
         response = generate_with_retry(client, GEMINI_MODEL, [prompt])
 
+        print(f"[VideoScriptAgent]   Gemini responded, parsing scenes...", flush=True)
         scenes = _extract_json(response.text)
 
         # Prefer session state (set by a future AvatarAgent), fall back to env
@@ -170,6 +173,9 @@ class VideoScriptAgent(BaseAgent):
         presenter_count = sum(1 for s in scenes if s["type"] == "presenter")
         broll_count = sum(1 for s in scenes if s["type"] == "broll")
         total_duration = sum(s["duration_seconds"] for s in scenes)
+        print(f"[VideoScriptAgent] ✅ Done — {len(scenes)} scenes ({presenter_count} presenter, {broll_count} b-roll), ~{total_duration}s total", flush=True)
+        for s in scenes:
+            print(f"  scene {s['scene_id']:2d}  type={s['type']:<9} duration={s['duration_seconds']}s  caption={s.get('caption')!r}", flush=True)
 
         yield Event(
             author=self.name,
