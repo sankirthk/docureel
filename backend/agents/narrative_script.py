@@ -37,7 +37,7 @@ Produce a short-form video script as JSON with this exact shape:
       "section_id": <int — must match a key_section id from the manifest>,
       "narration": "<2-3 fast sentences spoken aloud — conversational, no jargon, punchy>",
       "caption": "<max 8 words — include the most striking key_stat from this section>",
-      "tone": "<urgent | optimistic | neutral | dramatic — match section content and overall sentiment>"
+      "tone": "<urgent | optimistic | neutral | dramatic | cautious — match section content and overall sentiment>"
     }}
   ],
   "outro": "<1 closing sentence — prompts reflection or action>"

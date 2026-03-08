@@ -13,7 +13,7 @@ class Scene(BaseModel):
     section_id: int  # maps to Manifest.key_sections[].id
     narration: str   # spoken aloud by TTS
     caption: str     # short on-screen overlay text (max 8 words)
-    tone: Literal["urgent", "optimistic", "neutral", "dramatic"]
+    tone: Literal["urgent", "optimistic", "neutral", "dramatic", "cautious"]
 
 
 class NarrationScript(BaseModel):
