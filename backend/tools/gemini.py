@@ -35,6 +35,18 @@ def build_client() -> genai.Client:
     )
 
 
+def build_live_client() -> genai.Client:
+    """
+    Live API requires project + location — same as Veo.
+    Express Mode (API key) doesn't support the Live API on Vertex AI.
+    """
+    return genai.Client(
+        vertexai=True,
+        project=os.getenv("GOOGLE_CLOUD_PROJECT"),
+        location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
+    )
+
+
 def build_veo_client() -> genai.Client:
     """
     Veo's PredictLongRunning endpoint requires a project + location — Express

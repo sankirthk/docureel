@@ -29,16 +29,22 @@ export default function Home() {
   const [jobStatus, setJobStatus] = useState<"idle" | "processing" | "done" | "error">("idle");
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
-  const [transcript, setTranscript] = useState<string>("");
+  const isRecordingRef = useRef(false);
   const [pipelineStep, setPipelineStep] = useState<string>("");
   const [errorMsg, setErrorMsg] = useState<string>("");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  // Recording (mic → Gemini)
   const audioCtxRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Playback (Gemini audio → speaker)
+  const playbackCtxRef = useRef<AudioContext | null>(null);
+  const nextPlayTimeRef = useRef<number>(0);
+  // Debounce flag: only send one interrupt per Gemini turn
+  const interruptSentRef = useRef(false);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -113,6 +119,38 @@ export default function Home() {
     audioCtxRef.current = null;
   }, []);
 
+  const scheduleAudioChunk = useCallback((pcm16: ArrayBuffer) => {
+    // If we're recording, we shouldn't be playing audio back yet
+    if (isRecordingRef.current) return;
+
+    if (!playbackCtxRef.current) {
+      playbackCtxRef.current = new AudioContext({ sampleRate: 24000 });
+      nextPlayTimeRef.current = 0;
+    }
+    const ctx = playbackCtxRef.current;
+    
+    // If context was suspended (e.g., interrupted), resume it
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(e => console.error("Audio resume error", e));
+    }
+
+    const int16 = new Int16Array(pcm16);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+    const buffer = ctx.createBuffer(1, float32.length, 24000);
+    buffer.copyToChannel(float32, 0);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    
+    // Auto-advance play time if we fell behind (buffer underrun)
+    const startAt = Math.max(ctx.currentTime, nextPlayTimeRef.current);
+    source.start(startAt);
+    nextPlayTimeRef.current = startAt + buffer.duration;
+  }, []);
+
   const openWebSocket = useCallback(() => {
     if (wsRef.current || !jobId) return;
 
@@ -122,15 +160,31 @@ export default function Home() {
     ws.onopen = () => console.log("[ws] connected");
 
     ws.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        // Audio chunk from Gemini — schedule for playback
+        scheduleAudioChunk(event.data);
+        return;
+      }
       try {
         const data = JSON.parse(event.data as string);
-        if (data.type === "transcript" && data.text) {
-          setTranscript(data.text);
-          if (data.text.toLowerCase().includes("resuming now")) {
-            videoRef.current?.play();
-            stopMic();
-            setIsRecording(false);
+        if (data.type === "turn_complete") {
+          // Only resume video if we are absolutely done (not currently interrupting)
+          if (isRecordingRef.current) {
+            console.log("[ws] ignoring turn_complete because user is currently recording");
+            return;
           }
+
+          // Resume video after remaining audio finishes
+          const ctx = playbackCtxRef.current;
+          const delay = ctx
+            ? Math.max(0, (nextPlayTimeRef.current - ctx.currentTime) * 1000 + 200)
+            : 0;
+          setTimeout(() => {
+            // Only resume if still not recording
+            if (!isRecordingRef.current) {
+              videoRef.current?.play();
+            }
+          }, delay);
         }
       } catch {
         // ignore parse errors
@@ -145,7 +199,7 @@ export default function Home() {
     ws.onerror = (e) => console.error("[ws] error", e);
 
     wsRef.current = ws;
-  }, [jobId, stopMic]);
+  }, [jobId, scheduleAudioChunk]);
 
   // Clean up WS + mic on unmount
   useEffect(() => {
@@ -176,25 +230,57 @@ export default function Home() {
     processor.onaudioprocess = (e) => {
       const float32 = e.inputBuffer.getChannelData(0);
       const int16 = new Int16Array(float32.length);
+      // Determine if there is actual voice activity (crude volume gate)
+      let sumSquares = 0;
       for (let i = 0; i < float32.length; i++) {
+        sumSquares += float32[i] * float32[i];
         int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
       }
+      const rms = Math.sqrt(sumSquares / float32.length);
+      
       if (wsRef.current?.readyState === WebSocket.OPEN) {
+        // If the user starts talking while Gemini is playing audio,
+        // signal an interrupt by clearing local playback.
+        // Only fire once per turn to avoid spamming.
+        if (rms > 0.15 && !interruptSentRef.current) {
+            // Stop current playback to immediately silence Gemini locally
+            if (playbackCtxRef.current && playbackCtxRef.current.state === "running") {
+               playbackCtxRef.current.suspend();
+               nextPlayTimeRef.current = 0;
+               
+               // Send ONE interrupt signal to backend
+               interruptSentRef.current = true;
+               wsRef.current.send(JSON.stringify({ type: "client_interrupt" }));
+               console.log("[mic] Interrupt sent (RMS:", rms.toFixed(3), ")");
+            }
+        }
         wsRef.current.send(int16.buffer);
       }
     };
   };
 
   const handleMicToggle = async () => {
-    if (isRecording) {
+    if (isRecordingRef.current) {
+      // User tapped mic to stop explicitly — send final message via backend
+      // and let Gemini's turn_complete resume the video when it's done speaking.
       stopMic();
       setIsRecording(false);
-      videoRef.current?.play();
+      isRecordingRef.current = false;
+      interruptSentRef.current = false;
+      
+      // Let the backend know we explicitly stopped talking so it can trigger turnaround
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "client_turn_done" }));
+      }
     } else {
+      // User tapped mic to start speaking — pause video only, do NOT interrupt Gemini yet.
+      // The interrupt will fire automatically via voice-activity detection if Gemini is mid-speech.
       videoRef.current?.pause();
+      interruptSentRef.current = false;
       try {
         await startMic();
         setIsRecording(true);
+        isRecordingRef.current = true;
       } catch (err) {
         console.error("[mic] getUserMedia failed:", err);
         videoRef.current?.play();
@@ -398,15 +484,6 @@ export default function Home() {
               <div className="absolute bottom-8 left-0 right-0 px-6 text-center">
                 <div className="bg-black/80 backdrop-blur-md px-4 py-2 rounded-full border border-red-500/30 text-xs font-semibold text-red-400 inline-block shadow-lg">
                   Listening... Video Paused
-                </div>
-              </div>
-            )}
-
-            {/* Transcript display */}
-            {transcript && !isRecording && (
-              <div className="absolute bottom-8 left-0 right-0 px-4 text-center">
-                <div className="bg-black/80 backdrop-blur-md px-4 py-3 rounded-xl border border-white/10 text-xs text-zinc-200 shadow-lg text-left leading-relaxed">
-                  {transcript}
                 </div>
               </div>
             )}

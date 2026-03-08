@@ -7,12 +7,12 @@ import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from google.genai import types
 
-from tools.gemini import build_client
+from tools.gemini import build_live_client
 from tools.job_store import get_job
 
 router = APIRouter()
 
-LIVE_MODEL = "gemini-2.0-flash-live-preview-04-09"
+LIVE_MODEL = "publishers/google/models/gemini-2.0-flash-live-preview-04-09"
 
 
 def _build_system_prompt(job: dict) -> str:
@@ -75,63 +75,125 @@ async def live(websocket: WebSocket, job_id: str):
         return
 
     await websocket.accept()
+    print(f"[live] WebSocket accepted for job {job_id}", flush=True)
 
     system_prompt = _build_system_prompt(job)
-    client = build_client()
+    client = build_live_client()
 
+    live_config = types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        system_instruction=types.Content(
+            role="user",
+            parts=[types.Part(text=system_prompt)],
+        ),
+    )
+
+    print(f"[live] Connecting to Gemini Live ({LIVE_MODEL})...", flush=True)
     try:
         async with client.aio.live.connect(
             model=LIVE_MODEL,
-            config={
-                "response_modalities": ["TEXT"],
-                "system_instruction": system_prompt,
-            },
+            config=live_config,
         ) as session:
+            print(f"[live] Gemini Live session established for job {job_id}", flush=True)
+
+            closed = asyncio.Event()
 
             async def receive_from_client():
                 """Read PCM audio bytes from browser → forward to Gemini."""
                 try:
-                    while True:
-                        data = await websocket.receive_bytes()
-                        await session.send_realtime_input(
-                            media=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
-                        )
+                    while not closed.is_set():
+                        data = await websocket.receive()
+                        if data.get("type") == "websocket.disconnect":
+                            print("[live] Client disconnected (receive)", flush=True)
+                            break
+                        if data.get("bytes"):
+                            await session.send_realtime_input(
+                                media=types.Blob(data=data["bytes"], mime_type="audio/pcm;rate=16000")
+                            )
+                        elif data.get("text"):
+                            import json
+                            try:
+                                msg = json.loads(data["text"])
+                                if msg.get("type") == "client_interrupt":
+                                    print("[live] 🛑 Interrupt from client", flush=True)
+                                    await session.send(
+                                        input=types.LiveClientContent(
+                                            turns=[
+                                                types.Content(role="user", parts=[]),
+                                            ],
+                                            turn_complete=True,
+                                        )
+                                    )
+                                elif msg.get("type") == "client_turn_done":
+                                    print("[live] 🏁 User stopped mic", flush=True)
+                                    await session.send(
+                                        input=types.LiveClientContent(turn_complete=True)
+                                    )
+                            except Exception as parse_err:
+                                print(f"[live] WS text parse error: {parse_err}", flush=True)
                 except WebSocketDisconnect:
-                    pass
+                    print("[live] receive_from_client: WebSocketDisconnect", flush=True)
                 except Exception as e:
-                    print(f"[live] receive_from_client error: {e}")
+                    print(f"[live] receive_from_client error: {e}", flush=True)
+                finally:
+                    closed.set()
 
             async def send_to_client():
-                """Read Gemini text responses → forward to browser as JSON."""
+                """Stream audio chunks to browser; signal turn_complete when done."""
+                msg_count = 0
                 try:
-                    while True:
-                        async for msg in session.receive():
-                            if msg.text:
-                                await websocket.send_json(
-                                    {"type": "transcript", "text": msg.text}
-                                )
+                    async for msg in session.receive():
+                        if closed.is_set():
+                            break
+
+                        msg_count += 1
+
+                        # Shorthand: msg.data is PCM audio bytes when modality=AUDIO
+                        if msg.data:
+                            await websocket.send_bytes(msg.data)
+                        elif msg.server_content:
+                            sc = msg.server_content
+                            if sc.model_turn:
+                                for part in sc.model_turn.parts or []:
+                                    if hasattr(part, "inline_data") and part.inline_data and part.inline_data.data:
+                                        await websocket.send_bytes(bytes(part.inline_data.data))
+                            if sc.turn_complete:
+                                print(f"[live] turn_complete (msg #{msg_count}) → signalling client", flush=True)
+                                await websocket.send_json({"type": "turn_complete"})
+                        else:
+                            # Log unexpected message shapes
+                            print(f"[live] msg #{msg_count}: no data/server_content. "
+                                  f"attrs={[k for k in dir(msg) if not k.startswith('_')]}", flush=True)
                 except WebSocketDisconnect:
-                    pass
+                    print("[live] send_to_client: WebSocketDisconnect", flush=True)
                 except Exception as e:
-                    print(f"[live] send_to_client error: {e}")
+                    print(f"[live] send_to_client error: {type(e).__name__}: {e}", flush=True)
+                finally:
+                    closed.set()
+                    print(f"[live] send_to_client exited after {msg_count} msgs", flush=True)
 
             receive_task = asyncio.create_task(receive_from_client())
             send_task = asyncio.create_task(send_to_client())
 
-            done, pending = await asyncio.wait(
-                [receive_task, send_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            # Wait for BOTH tasks — don't kill one when the other finishes.
+            # The closed event coordinates shutdown.
+            await closed.wait()
 
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            # Give the other task a moment to finish gracefully
+            await asyncio.sleep(0.5)
+
+            for task in [receive_task, send_task]:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+            print(f"[live] Session fully closed for job {job_id}", flush=True)
 
     except WebSocketDisconnect:
-        pass
+        print(f"[live] WebSocketDisconnect (outer) for job {job_id}", flush=True)
     except Exception as e:
         print(f"[live] session error for job {job_id}: {e}")
         try:
