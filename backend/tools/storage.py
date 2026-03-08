@@ -5,6 +5,7 @@ DEV_MODE=true  → files written to local_storage/{job_id}/
 DEV_MODE=false → files written to GCS (GCS_BUCKET env var)
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -12,6 +13,24 @@ DEV_MODE = os.getenv("DEV_MODE", "true").lower() == "true"
 GCS_BUCKET = os.getenv("GCS_BUCKET", "nevertrtfm")
 
 LOCAL_ROOT = Path(__file__).parent.parent / "local_storage"
+
+
+CACHE_ROOT = LOCAL_ROOT / "cache"
+
+
+def save_cache(pdf_hash: str, name: str, data: dict) -> None:
+    """Persist a dict as JSON under local_storage/cache/{pdf_hash}/{name}.json"""
+    dest = CACHE_ROOT / pdf_hash / f"{name}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(data, indent=2))
+
+
+def load_cache(pdf_hash: str, name: str) -> dict | None:
+    """Load a cached JSON dict, or return None if not found."""
+    path = CACHE_ROOT / pdf_hash / f"{name}.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return None
 
 
 def read_bytes(uri: str) -> bytes:

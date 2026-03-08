@@ -30,7 +30,7 @@ from pydantic import ValidationError
 
 from models.manifest import Manifest
 from tools.gemini import build_client, GEMINI_MODEL, generate_with_retry
-from tools.storage import read_bytes
+from tools.storage import read_bytes, save_cache
 from tools.job_store import update_job
 
 MANIFEST_PROMPT = """
@@ -207,10 +207,16 @@ class ParserAgent(BaseAgent):
             raise ValueError(f"ParserAgent: manifest validation failed:\n{e}") from e
 
         print(f"[ParserAgent] ✅ Done — title={manifest.title!r}, sections={len(manifest.key_sections)}, sentiment={manifest.sentiment}", flush=True)
-        ctx.session.state["manifest"] = manifest.model_dump()
+        manifest_dict = manifest.model_dump()
+        ctx.session.state["manifest"] = manifest_dict
+
+        # Cache so future runs with the same PDF skip this step
+        if ctx.session.state.get("pdf_hash"):
+            save_cache(ctx.session.state["pdf_hash"], "manifest", manifest_dict)
+            print(f"[ParserAgent]   Cached manifest for pdf_hash={ctx.session.state['pdf_hash'][:8]}...", flush=True)
 
         # Write to job store now so LiveAgent can load it before the full pipeline finishes
-        update_job(job_id, step="scripting", manifest=manifest.model_dump())
+        update_job(job_id, step="scripting", manifest=manifest_dict)
 
         yield Event(
             author=self.name,

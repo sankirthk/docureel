@@ -8,6 +8,7 @@
 # B-roll scenes:    prompt only, no reference image, no audio
 
 import asyncio
+import os
 import time
 from pathlib import Path
 from typing import AsyncGenerator
@@ -48,7 +49,7 @@ def _load_avatar(path: str) -> types.Image | None:
     return types.Image(image_bytes=p.read_bytes(), mime_type="image/jpeg")
 
 
-def _generate_clip(client, scene: dict, avatar_image: types.Image | None) -> bytes:
+def _generate_clip(client, scene: dict, avatar_image: types.Image | None, job_id: str) -> bytes:
     """
     Blocking Veo generation + polling — called via asyncio.to_thread.
     Presenter scenes use the avatar as a reference image and enable native audio.
@@ -60,17 +61,6 @@ def _generate_clip(client, scene: dict, avatar_image: types.Image | None) -> byt
         aspect_ratio="9:16",
         duration_seconds=scene["duration_seconds"],
         number_of_videos=1,
-        # Native audio generation — Veo lip-syncs the dialogue for presenter scenes
-        generate_audio=is_presenter,
-        # Reference image anchors the presenter's appearance across scenes
-        reference_images=(
-            [types.VideoGenerationReferenceImage(
-                image=avatar_image,
-                reference_type=types.VideoGenerationReferenceType.ASSET,
-            )]
-            if is_presenter and avatar_image
-            else None
-        ),
     )
 
     # For presenter scenes, append dialogue to the prompt so Veo knows what to say
@@ -78,7 +68,9 @@ def _generate_clip(client, scene: dict, avatar_image: types.Image | None) -> byt
     if is_presenter and scene.get("dialogue"):
         prompt = f'{prompt}\n\nSpoken dialogue: "{scene["dialogue"]}"'
 
-    print(f"    [Veo] Submitting generation request for scene {scene['scene_id']} ({scene['type']}, {scene['duration_seconds']}s)...", flush=True)
+    print(f"    [Veo] Config: model={VEO_MODEL} aspect=9:16 duration={scene['duration_seconds']}s", flush=True)
+    print(f"    [Veo] Prompt: {prompt[:120]!r}", flush=True)
+    print(f"    [Veo] Submitting...", flush=True)
     operation = client.models.generate_videos(
         model=VEO_MODEL,
         prompt=prompt,
@@ -99,15 +91,23 @@ def _generate_clip(client, scene: dict, avatar_image: types.Image | None) -> byt
         raise RuntimeError(f"Veo generation failed for scene {scene['scene_id']}: {operation.error}")
 
     # Download the generated video bytes.
-    # Vertex AI client does not support client.files.download() — the video is
-    # stored in GCS and must be fetched via the storage client using its URI.
     generated_video = operation.result.generated_videos[0]
-    video_uri = generated_video.video.uri  # gs://bucket/path/to/clip.mp4
-    gcs = build_gcs_client()
-    without_prefix = video_uri.removeprefix("gs://")
-    bucket_name, blob_path = without_prefix.split("/", 1)
-    video_bytes = gcs.bucket(bucket_name).blob(blob_path).download_as_bytes()
-    return video_bytes
+    video = generated_video.video
+
+    video_uri = getattr(video, "uri", None) if video else None
+    video_bytes_inline = getattr(video, "video_bytes", None) if video else None
+    print(f"    [Veo] uri={video_uri!r}  video_bytes={'len=' + str(len(video_bytes_inline)) if video_bytes_inline else None}", flush=True)
+
+    if video_uri:
+        gcs = build_gcs_client()
+        without_prefix = video_uri.removeprefix("gs://")
+        bucket_name, blob_path = without_prefix.split("/", 1)
+        return gcs.bucket(bucket_name).blob(blob_path).download_as_bytes()
+
+    if video_bytes_inline:
+        return bytes(video_bytes_inline)
+
+    raise RuntimeError(f"Veo returned no URI and no video_bytes for scene {scene['scene_id']}. Raw video obj: {video}")
 
 
 class VeoAgent(BaseAgent):
@@ -141,7 +141,7 @@ class VeoAgent(BaseAgent):
             print(f"[VeoAgent]   prompt: {scene['prompt'][:100]}...", flush=True)
 
             # Offload blocking generation + polling to thread pool
-            video_bytes = await asyncio.to_thread(_generate_clip, client, scene, avatar_img)
+            video_bytes = await asyncio.to_thread(_generate_clip, client, scene, avatar_img, job_id)
             print(f"[VeoAgent]   scene {scene_id} ✅ downloaded {len(video_bytes):,} bytes", flush=True)
 
             clip_path = save_upload(job_id, f"clip_{scene_id:02d}.mp4", video_bytes)

@@ -21,6 +21,7 @@ from google.adk.events import Event
 from google.genai import types
 
 from tools.gemini import build_client, GEMINI_MODEL, generate_with_retry
+from tools.storage import save_cache
 from tools.job_store import update_job
 
 VIDEO_SCRIPT_PROMPT = """
@@ -169,6 +170,11 @@ class VideoScriptAgent(BaseAgent):
         }
         ctx.session.state["video_script"] = video_script
         update_job(job_id, step="veo", video_script=video_script)
+
+        # Cache so future runs with the same PDF skip this step
+        if ctx.session.state.get("pdf_hash"):
+            save_cache(ctx.session.state["pdf_hash"], "video_script", video_script)
+            print(f"[VideoScriptAgent]   Cached video_script for pdf_hash={ctx.session.state['pdf_hash'][:8]}...", flush=True)
 
         presenter_count = sum(1 for s in scenes if s["type"] == "presenter")
         broll_count = sum(1 for s in scenes if s["type"] == "broll")

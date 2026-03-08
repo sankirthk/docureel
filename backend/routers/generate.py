@@ -34,7 +34,7 @@ async def generate(file: UploadFile = File(...), background_tasks: BackgroundTas
 
     # Import here to avoid circular imports at module load time
     from pipeline import run_pipeline
-    background_tasks.add_task(run_pipeline, job_id, file_path)
+    background_tasks.add_task(run_pipeline, job_id, file_path, data)
     print(f"[generate] Pipeline queued as background task", flush=True)
 
     return {"job_id": job_id, "status": "processing"}
