@@ -4,7 +4,7 @@ IN:  session["manifest"]          — validated Manifest dict from ParserAgent
 OUT: session["narration_script"]  — NarrationScript dict { hook, scenes, outro }
 
 Reads the full manifest JSON and produces a TikTok-style video script.
-One scene per key_section, targeting 30-60 seconds total narration (~75-150 words).
+Max 4 scenes total, targeting ~30 seconds total narration (~60-80 words).
 Model: Gemini 3 Flash (publishers/google/models/gemini-3-flash-preview)
 """
 
@@ -52,8 +52,8 @@ Output JSON with this exact shape:
 }}
 
 Rules:
-- One scene per key_section, same order, matching section_id
-- Total words across hook + all narration + outro: 90-120 words
+- Pick the 3-4 most important key_sections — do NOT include all of them if there are more than 4
+- Total words across hook + all narration + outro: 60-80 words
 - Use the real numbers — but say them how a person would say them out loud
 - No bullet points in your head. No listy sentences. Flowing speech only.
 - No exclamation points. No rhetorical questions. No "let that sink in".

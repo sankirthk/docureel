@@ -35,9 +35,14 @@ async def generate(request: Request, file: UploadFile = File(...), background_ta
 
     job_id = str(uuid.uuid4())
     data = await file.read()
+
+    page_count = len(__import__("re").findall(rb"/Type\s*/Page[^s]", data))
+    if page_count > 50:
+        raise HTTPException(status_code=400, detail=f"PDF has {page_count} pages — limit is 50.")
+
     print(f"\n{'='*60}", flush=True)
     print(f"[generate] New job: {job_id}", flush=True)
-    print(f"[generate] File: {file.filename!r}  size: {len(data):,} bytes", flush=True)
+    print(f"[generate] File: {file.filename!r}  size: {len(data):,} bytes  pages: {page_count}", flush=True)
 
     file_path = save_upload(job_id, file.filename or "upload.pdf", data)
     print(f"[generate] Saved to: {file_path}", flush=True)

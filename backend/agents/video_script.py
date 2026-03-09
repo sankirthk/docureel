@@ -69,7 +69,7 @@ Dialogue rules:
 - Real numbers, active voice, no jargon
 - Flows naturally from one scene to the next as one continuous narration
 
-Total duration: 40-64 seconds (5-8 scenes × 8s each).
+Total duration: 24-32 seconds (3-4 scenes × 8s each). Never exceed 4 scenes.
 
 Example:
 [
@@ -139,6 +139,11 @@ class VideoScriptAgent(BaseAgent):
 
         print(f"[VideoScriptAgent]   Gemini responded, parsing scenes...", flush=True)
         scenes = _extract_json(response.text)
+
+        # Hard cap — trim to 4 scenes max (~32s) regardless of what the model returns
+        if len(scenes) > 4:
+            print(f"[VideoScriptAgent]   Trimming {len(scenes)} scenes → 4", flush=True)
+            scenes = scenes[:4]
 
         # Prefer session state (set by a future AvatarAgent), fall back to env
         video_script = {

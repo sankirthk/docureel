@@ -386,8 +386,19 @@ function App({ token }: { token: string | null }) {
                 type="file"
                 accept="application/pdf"
                 className="hidden"
-                onChange={(e) => {
+                onChange={async (e) => {
                   const selected = e.target.files?.[0] ?? null;
+                  if (selected) {
+                    const buf = await selected.arrayBuffer();
+                    const text = new TextDecoder("latin1").decode(buf);
+                    const pages = (text.match(/\/Type\s*\/Page[^s]/g) || []).length;
+                    if (pages > 50) {
+                      setStatusText(`PDF has ${pages} pages — limit is 50.`);
+                      setFile(null);
+                      e.target.value = "";
+                      return;
+                    }
+                  }
                   setFile(selected);
                 }}
               />

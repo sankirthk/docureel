@@ -17,6 +17,11 @@ export const metadata: Metadata = {
   description: "Reports to Video + Live Q&A",
 };
 
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
