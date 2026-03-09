@@ -16,6 +16,7 @@ Two backends, switched via PARSER_BACKEND env var:
       Requires DOCUMENT_AI_PROCESSOR_ID env var.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -194,10 +195,11 @@ class ParserAgent(BaseAgent):
         client = build_client()
         print(f"[ParserAgent]   Sending PDF to Gemini...", flush=True)
 
+        # Wrap blocking HTTP call in to_thread so ParallelAgent can truly interleave
         if backend == "documentai":
-            raw = _parse_with_documentai(pdf_bytes, client)
+            raw = await asyncio.to_thread(_parse_with_documentai, pdf_bytes, client)
         else:
-            raw = _parse_with_gemini(pdf_bytes, client)
+            raw = await asyncio.to_thread(_parse_with_gemini, pdf_bytes, client)
 
         print(f"[ParserAgent]   Gemini responded, validating manifest...", flush=True)
         try:
@@ -225,3 +227,36 @@ class ParserAgent(BaseAgent):
 
 
 parser_agent = ParserAgent(name="ParserAgent")
+
+
+def run_parser(file_path: str, job_id: str, pdf_hash: str | None = None) -> dict:
+    """
+    Standalone blocking function — call via asyncio.to_thread for true parallelism.
+    Identical logic to ParserAgent but without ADK scaffolding.
+    """
+    import os as _os
+    from tools.storage import save_cache as _save_cache
+
+    backend = _os.getenv("PARSER_BACKEND", "gemini").lower()
+    update_job(job_id, step="parsing")
+    print(f"\n[run_parser] ▶ backend={backend!r}", flush=True)
+
+    with open(file_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    client = build_client()
+
+    if backend == "documentai":
+        raw = _parse_with_documentai(pdf_bytes, client)
+    else:
+        raw = _parse_with_gemini(pdf_bytes, client)
+
+    manifest = Manifest.model_validate(raw)
+    manifest_dict = manifest.model_dump()
+    print(f"[run_parser] ✅ title={manifest.title!r}  sections={len(manifest.key_sections)}", flush=True)
+
+    update_job(job_id, step="scripting", manifest=manifest_dict)
+    if pdf_hash:
+        _save_cache(pdf_hash, "manifest", manifest_dict)
+
+    return manifest_dict

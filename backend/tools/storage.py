@@ -19,18 +19,32 @@ CACHE_ROOT = LOCAL_ROOT / "cache"
 
 
 def save_cache(pdf_hash: str, name: str, data: dict) -> None:
-    """Persist a dict as JSON under local_storage/cache/{pdf_hash}/{name}.json"""
-    dest = CACHE_ROOT / pdf_hash / f"{name}.json"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(data, indent=2))
+    """Persist a dict as JSON. Local in DEV_MODE, GCS otherwise."""
+    if DEV_MODE:
+        dest = CACHE_ROOT / pdf_hash / f"{name}.json"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(data, indent=2))
+    else:
+        client = build_gcs_client()
+        blob = client.bucket(GCS_BUCKET).blob(f"cache/{pdf_hash}/{name}.json")
+        blob.upload_from_string(json.dumps(data, indent=2), content_type="application/json")
 
 
 def load_cache(pdf_hash: str, name: str) -> dict | None:
     """Load a cached JSON dict, or return None if not found."""
-    path = CACHE_ROOT / pdf_hash / f"{name}.json"
-    if path.exists():
-        return json.loads(path.read_text())
-    return None
+    if DEV_MODE:
+        path = CACHE_ROOT / pdf_hash / f"{name}.json"
+        if path.exists():
+            return json.loads(path.read_text())
+        return None
+    else:
+        from google.cloud.exceptions import NotFound
+        client = build_gcs_client()
+        blob = client.bucket(GCS_BUCKET).blob(f"cache/{pdf_hash}/{name}.json")
+        try:
+            return json.loads(blob.download_as_text())
+        except NotFound:
+            return None
 
 
 def read_bytes(uri: str) -> bytes:

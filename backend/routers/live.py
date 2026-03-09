@@ -1,18 +1,24 @@
 # WS /api/live/{job_id} — LiveAgent
-# Bidirectional: receives PCM 16-bit audio from browser, sends text transcripts back.
-# "resuming now" in response text → frontend resumes video (no backend logic needed).
+# Bidirectional: receives PCM 16-bit audio + JSON commands from browser,
+# sends JSON audio/transcript/video-control messages back.
 
 import asyncio
+import base64
+import json
+import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from google.genai import types
 
+from tools.auth import verify_ws_token
 from tools.gemini import build_live_client
 from tools.job_store import get_job
+from tools.rate_limit import check_ws_limit
 
 router = APIRouter()
 
 LIVE_MODEL = "publishers/google/models/gemini-2.0-flash-live-preview-04-09"
+WS_SESSION_TIMEOUT_SECS = int(os.getenv("WS_SESSION_TIMEOUT_SECS", "600"))  # 10 min default
 
 
 def _build_system_prompt(job: dict) -> str:
@@ -60,22 +66,31 @@ def _build_system_prompt(job: dict) -> str:
 
     lines.append(
         "\nIMPORTANT: Answer questions conversationally, like explaining to a friend. "
-        "Be concise (2-4 sentences max). "
-        "Always end every answer with the exact phrase \"resuming now\" so the video can resume."
+        "Be concise (2-4 sentences max)."
     )
 
     return "\n".join(lines)
 
 
 @router.websocket("/live/{job_id}")
-async def live(websocket: WebSocket, job_id: str):
+async def live(websocket: WebSocket, job_id: str, token: str = ""):
+    if not verify_ws_token(token):
+        await websocket.close(code=1008)
+        return
+
     job = get_job(job_id)
     if job is None or job["status"] != "done":
         await websocket.close(code=1008)
         return
 
+    ip = websocket.client.host if websocket.client else "unknown"
+    if not check_ws_limit(ip):
+        print(f"[live] Rate limit exceeded for IP {ip}", flush=True)
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
-    print(f"[live] WebSocket accepted for job {job_id}", flush=True)
+    print(f"[live] WebSocket accepted for job {job_id} (IP {ip})", flush=True)
 
     system_prompt = _build_system_prompt(job)
     client = build_live_client()
@@ -99,7 +114,7 @@ async def live(websocket: WebSocket, job_id: str):
             closed = asyncio.Event()
 
             async def receive_from_client():
-                """Read PCM audio bytes from browser → forward to Gemini."""
+                """Read PCM audio bytes + JSON commands from browser → forward to Gemini."""
                 audio_chunk_count = 0
                 try:
                     while not closed.is_set():
@@ -107,6 +122,8 @@ async def live(websocket: WebSocket, job_id: str):
                         if data.get("type") == "websocket.disconnect":
                             print("[live] Client disconnected (receive)", flush=True)
                             break
+
+                        # ── Binary: raw PCM audio from mic ──
                         if data.get("bytes"):
                             audio_chunk_count += 1
                             if audio_chunk_count <= 3 or audio_chunk_count % 50 == 0:
@@ -114,11 +131,54 @@ async def live(websocket: WebSocket, job_id: str):
                             await session.send_realtime_input(
                                 media=types.Blob(data=data["bytes"], mime_type="audio/pcm;rate=16000")
                             )
+
+                        # ── Text: JSON command from frontend ──
                         elif data.get("text"):
-                            import json
                             try:
                                 msg = json.loads(data["text"])
-                                if msg.get("type") == "client_interrupt":
+                                msg_type = msg.get("type", "")
+
+                                if msg_type == "end_turn":
+                                    # User clicked "Stop mic / end turn"
+                                    print("[live] 🏁 end_turn from client", flush=True)
+                                    await session.send(
+                                        input=types.LiveClientContent(turn_complete=True)
+                                    )
+
+                                elif msg_type == "text":
+                                    # User sent a typed text question
+                                    text = msg.get("text", "")
+                                    print(f"[live] 💬 Text question: {text[:80]}", flush=True)
+                                    await session.send(
+                                        input=types.LiveClientContent(
+                                            turns=[
+                                                types.Content(
+                                                    role="user",
+                                                    parts=[types.Part(text=text)],
+                                                )
+                                            ],
+                                            turn_complete=True,
+                                        )
+                                    )
+
+                                elif msg_type == "set_scene":
+                                    # Update Gemini with current scene context
+                                    scene = msg.get("scene_text", "")
+                                    print(f"[live] 🎬 Scene context: {scene[:80]}", flush=True)
+                                    await session.send(
+                                        input=types.LiveClientContent(
+                                            turns=[
+                                                types.Content(
+                                                    role="user",
+                                                    parts=[types.Part(text=f"[Current scene context]: {scene}")],
+                                                )
+                                            ],
+                                            turn_complete=False,
+                                        )
+                                    )
+
+                                elif msg_type == "client_interrupt":
+                                    # Voice-activity interrupt (legacy support)
                                     print("[live] 🛑 Interrupt from client", flush=True)
                                     await session.send(
                                         input=types.LiveClientContent(
@@ -128,13 +188,13 @@ async def live(websocket: WebSocket, job_id: str):
                                             turn_complete=True,
                                         )
                                     )
-                                elif msg.get("type") == "client_turn_done":
-                                    print("[live] 🏁 User stopped mic", flush=True)
-                                    await session.send(
-                                        input=types.LiveClientContent(turn_complete=True)
-                                    )
+
+                                else:
+                                    print(f"[live] Unknown msg type: {msg_type}", flush=True)
+
                             except Exception as parse_err:
                                 print(f"[live] WS text parse error: {parse_err}", flush=True)
+
                 except WebSocketDisconnect:
                     print("[live] receive_from_client: WebSocketDisconnect", flush=True)
                 except Exception as e:
@@ -143,35 +203,77 @@ async def live(websocket: WebSocket, job_id: str):
                     closed.set()
 
             async def send_to_client():
-                """Stream audio chunks to browser; signal turn_complete when done."""
+                """Stream Gemini responses to browser as JSON messages."""
                 msg_count = 0
                 turn_count = 0
+                first_audio_in_turn = True
+                accumulated_text = ""
                 try:
                     # session.receive() yields messages for ONE turn only.
-                    # We must re-call it after each turn to keep the session alive.
+                    # Re-call it after each turn to keep the session alive.
                     while not closed.is_set():
                         turn_count += 1
+                        first_audio_in_turn = True
+                        accumulated_text = ""
                         print(f"[live] 📡 Waiting for Gemini turn #{turn_count}...", flush=True)
+
                         async for msg in session.receive():
                             if closed.is_set():
                                 break
 
                             msg_count += 1
 
-                            # Shorthand: msg.data is PCM audio bytes when modality=AUDIO
+                            # ── Audio data from Gemini ──
+                            audio_bytes = None
+                            text_chunk = ""
+
                             if msg.data:
-                                await websocket.send_bytes(msg.data)
+                                audio_bytes = msg.data
                             elif msg.server_content:
                                 sc = msg.server_content
                                 if sc.model_turn:
                                     for part in sc.model_turn.parts or []:
                                         if hasattr(part, "inline_data") and part.inline_data and part.inline_data.data:
-                                            await websocket.send_bytes(bytes(part.inline_data.data))
+                                            audio_bytes = bytes(part.inline_data.data)
+                                        elif hasattr(part, "text") and part.text:
+                                            text_chunk = part.text
+
+                                # ── Turn complete ──
                                 if sc.turn_complete:
-                                    print(f"[live] turn_complete (msg #{msg_count}, turn #{turn_count}) → signalling client", flush=True)
-                                    await websocket.send_json({"type": "turn_complete"})
-                            else:
-                                print(f"[live] msg #{msg_count}: no data/server_content", flush=True)
+                                    print(f"[live] turn_complete (msg #{msg_count}, turn #{turn_count})", flush=True)
+                                    # Send final transcript with accumulated text
+                                    await websocket.send_json({
+                                        "type": "transcript",
+                                        "speaker": "agent",
+                                        "text": accumulated_text.strip() or "🔊 Responded with audio",
+                                        "final": True,
+                                    })
+                                    await websocket.send_json({"type": "resume_video"})
+                                    continue
+
+                            # Send text transcript chunk (streaming)
+                            if text_chunk:
+                                accumulated_text += text_chunk
+                                await websocket.send_json({
+                                    "type": "transcript",
+                                    "speaker": "agent",
+                                    "text": accumulated_text,
+                                    "final": False,
+                                })
+
+                            if audio_bytes:
+                                # On first audio chunk of a turn, pause the video
+                                if first_audio_in_turn:
+                                    first_audio_in_turn = False
+                                    await websocket.send_json({"type": "pause_video"})
+
+                                # Encode PCM bytes as base64 and send as JSON
+                                b64 = base64.b64encode(audio_bytes).decode("ascii")
+                                await websocket.send_json({
+                                    "type": "audio",
+                                    "data_b64": b64,
+                                })
+
                 except WebSocketDisconnect:
                     print("[live] send_to_client: WebSocketDisconnect", flush=True)
                 except Exception as e:
@@ -183,9 +285,16 @@ async def live(websocket: WebSocket, job_id: str):
             receive_task = asyncio.create_task(receive_from_client())
             send_task = asyncio.create_task(send_to_client())
 
-            # Wait for BOTH tasks — don't kill one when the other finishes.
-            # The closed event coordinates shutdown.
+            # Hard session timeout — kills the session to cap Gemini Live API cost
+            async def _timeout():
+                await asyncio.sleep(WS_SESSION_TIMEOUT_SECS)
+                print(f"[live] ⏰ Session timeout ({WS_SESSION_TIMEOUT_SECS}s) for job {job_id}", flush=True)
+                closed.set()
+
+            timeout_task = asyncio.create_task(_timeout())
+
             await closed.wait()
+            timeout_task.cancel()
 
             # Give the other task a moment to finish gracefully
             await asyncio.sleep(0.5)
@@ -205,7 +314,7 @@ async def live(websocket: WebSocket, job_id: str):
     except Exception as e:
         print(f"[live] session error for job {job_id}: {e}")
         try:
-            await websocket.send_json({"type": "error", "text": str(e)})
+            await websocket.send_json({"type": "error", "message": str(e)})
             await websocket.close()
         except Exception:
             pass

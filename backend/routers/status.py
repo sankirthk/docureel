@@ -7,9 +7,11 @@ rewrites that to /api/video/{job_id} so the browser has an actual HTTP URL.
 In prod the stitcher stores a signed GCS URL which is returned as-is.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
 
+from tools.auth import require_token
+from tools.limiter import limiter
 from tools.job_store import get_job
 from tools.storage import DEV_MODE
 
@@ -25,11 +27,12 @@ def _resolve_video_url(job_id: str, raw_url: str | None) -> str | None:
     if raw_url.startswith("gs://"):
         return None             # unsigned GCS URI — shouldn't happen in prod
     # Local filesystem path (DEV_MODE) — serve via /api/video/{job_id}
-    return f"/api/video/{job_id}"
+    return f"http://127.0.0.1:8080/api/video/{job_id}"
 
 
 @router.get("/status/{job_id}")
-async def status(job_id: str):
+@limiter.limit("60/minute")
+async def status(request: Request, job_id: str, _: None = Depends(require_token)):
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")

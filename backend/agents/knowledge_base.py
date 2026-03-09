@@ -9,6 +9,7 @@ so it can answer detailed follow-up questions with expert-level accuracy.
 Model: gemini-3.1-pro-preview via Vertex AI
 """
 
+import asyncio
 import json
 import os
 import re
@@ -78,13 +79,12 @@ class KnowledgeBaseAgent(BaseAgent):
         client = build_client()
         print(f"[KnowledgeBaseAgent]   Sending PDF to Gemini...", flush=True)
 
-        response = generate_with_retry(
+        # Wrap blocking HTTP call in to_thread so ParallelAgent can truly interleave
+        response = await asyncio.to_thread(
+            generate_with_retry,
             client,
             GEMINI_MODEL,
-            [
-                types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-                PROMPT,
-            ],
+            [types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"), PROMPT],
         )
 
         print(f"[KnowledgeBaseAgent]   Gemini responded, validating...", flush=True)
@@ -107,3 +107,31 @@ class KnowledgeBaseAgent(BaseAgent):
 
 
 knowledge_base_agent = KnowledgeBaseAgent(name="KnowledgeBaseAgent")
+
+
+def run_knowledge_base(file_path: str, job_id: str) -> dict:
+    """
+    Standalone blocking function — call via asyncio.to_thread for true parallelism.
+    Identical logic to KnowledgeBaseAgent but without ADK scaffolding.
+    """
+    print(f"\n[run_knowledge_base] ▶ Starting", flush=True)
+
+    pdf_bytes = read_bytes(file_path)
+    client = build_client()
+
+    response = generate_with_retry(
+        client,
+        GEMINI_MODEL,
+        [
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+            PROMPT,
+        ],
+    )
+
+    raw = _extract_json(response.text)
+    kb = KnowledgeBase.model_validate(raw)
+    kb_dict = kb.model_dump()
+
+    print(f"[run_knowledge_base] ✅ {len(kb.deep_findings)} findings, {len(kb.key_facts)} facts", flush=True)
+    update_job(job_id, knowledge_base=kb_dict)
+    return kb_dict

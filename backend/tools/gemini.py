@@ -17,6 +17,9 @@ from google.genai import types
 GEMINI_MODEL = "publishers/google/models/gemini-3.1-pro-preview"
 GEMINI_FLASH_MODEL = "publishers/google/models/gemini-3-flash-preview"
 VEO_MODEL = "publishers/google/models/veo-3.0-generate-preview"
+# Veo 3.1 fast — used for presenter scenes that require a reference image (avatar).
+# reference_images is not supported by veo-3.0-generate-preview.
+VEO_FAST_MODEL = "publishers/google/models/veo-3.1-fast-generate-001"
 
 # Retry config for 429 RESOURCE_EXHAUSTED
 _MAX_RETRIES = 5

@@ -1,11 +1,12 @@
 # VeoAgent
 # IN:  session["video_script"] — { scenes, avatar_male_path, avatar_female_path }
-# OUT: session["veo_clips"]   — [{ scene_id, clip_path, duration_seconds, type, caption }]
-# Model: Veo 3.0 (publishers/google/models/veo-3.0-generate-preview)
+# OUT: session["veo_clips"]   — [{ scene_id, clip_path, duration_seconds, caption }]
+# Model: Veo 3.1 Fast (reference_to_video) for all scenes
 #
-# Presenter scenes: reference avatar image + generateAudio=True (Veo bakes in
-#                   lip-synced audio from the dialogue natively)
-# B-roll scenes:    prompt only, no reference image, no audio
+# Every scene is a presenter scene — one continuous presenter on screen,
+# background changes per scene. Avatar reference image anchors appearance.
+# Dialogue is appended to the prompt so Veo bakes in lip-synced audio.
+# reference_to_video requires exactly 8s — shorter durations are clamped.
 
 import asyncio
 import os
@@ -18,11 +19,15 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
 
-from tools.gemini import build_veo_client, VEO_MODEL
+from tools.gemini import build_veo_client, VEO_MODEL, VEO_FAST_MODEL
 from tools.storage import save_upload, build_gcs_client
 from tools.job_store import update_job
 
 POLL_INTERVAL = 15  # seconds between operation status checks
+
+# Max simultaneous Veo operations. Veo 3 preview quota is ~2 concurrent requests.
+# Raise to 3-4 if your project has higher quota; lower to 1 to avoid 429s.
+MAX_CONCURRENT_VEO = int(os.getenv("MAX_CONCURRENT_VEO", "2"))
 
 
 def _load_avatar(path: str) -> types.Image | None:
@@ -52,27 +57,47 @@ def _load_avatar(path: str) -> types.Image | None:
 def _generate_clip(client, scene: dict, avatar_image: types.Image | None, job_id: str) -> bytes:
     """
     Blocking Veo generation + polling — called via asyncio.to_thread.
-    Presenter scenes use the avatar as a reference image and enable native audio.
-    B-roll scenes are silent with no reference image.
+    All scenes are presenter scenes: avatar reference image + dialogue audio.
+    reference_to_video only supports 8s — clamp anything shorter.
     """
-    is_presenter = scene["type"] == "presenter"
+    # Build prompt: prepend reference-character instruction, append dialogue
+    prompt = scene["prompt"]
+    if scene.get("dialogue"):
+        prompt = f'{prompt}\n\nSpoken dialogue: "{scene["dialogue"]}"'
+
+    duration = scene["duration_seconds"]
+    # reference_to_video only supports 8s clips — clamp if shorter
+    if duration < 8:
+        print(f"    [Veo] Clamping duration {duration}s → 8s (reference_to_video minimum)", flush=True)
+        duration = 8
+
+    reference_images = None
+    model = VEO_MODEL
+    if avatar_image is not None:
+        reference_images = [
+            types.VideoGenerationReferenceImage(
+                image=avatar_image,
+                reference_type=types.VideoGenerationReferenceType.ASSET,
+            )
+        ]
+        model = VEO_FAST_MODEL
+        prompt = f"The 3D animated character from the reference image presents to camera. {prompt}"
+        print(f"    [Veo] Using avatar reference image (ASSET) → {VEO_FAST_MODEL}", flush=True)
+    else:
+        print(f"    [Veo] No avatar image — falling back to {VEO_MODEL} (no reference)", flush=True)
 
     config = types.GenerateVideosConfig(
         aspect_ratio="9:16",
-        duration_seconds=scene["duration_seconds"],
+        duration_seconds=duration,
         number_of_videos=1,
+        reference_images=reference_images,
     )
 
-    # For presenter scenes, append dialogue to the prompt so Veo knows what to say
-    prompt = scene["prompt"]
-    if is_presenter and scene.get("dialogue"):
-        prompt = f'{prompt}\n\nSpoken dialogue: "{scene["dialogue"]}"'
-
-    print(f"    [Veo] Config: model={VEO_MODEL} aspect=9:16 duration={scene['duration_seconds']}s", flush=True)
+    print(f"    [Veo] model={model}  aspect=9:16  duration={duration}s", flush=True)
     print(f"    [Veo] Prompt: {prompt[:120]!r}", flush=True)
     print(f"    [Veo] Submitting...", flush=True)
     operation = client.models.generate_videos(
-        model=VEO_MODEL,
+        model=model,
         prompt=prompt,
         config=config,
     )
@@ -128,32 +153,32 @@ class VeoAgent(BaseAgent):
         avatar_female = _load_avatar(video_script.get("avatar_female_path", ""))
         print(f"[VeoAgent]   avatar_male loaded={avatar_male is not None}  avatar_female loaded={avatar_female is not None}", flush=True)
 
-        clips = []
-        for scene in scenes:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_VEO)
+        print(f"[VeoAgent]   Parallelism: {MAX_CONCURRENT_VEO} concurrent Veo requests", flush=True)
+
+        async def generate_scene(scene: dict) -> dict:
             scene_id = scene["scene_id"]
-            is_presenter = scene["type"] == "presenter"
+            avatar_img = avatar_male if scene.get("avatar") == "male" else avatar_female
 
-            avatar_img = None
-            if is_presenter:
-                avatar_img = avatar_male if scene.get("avatar") == "male" else avatar_female
-
-            print(f"[VeoAgent]   scene {scene_id}/{len(scenes)}: type={scene['type']!r}  duration={scene['duration_seconds']}s  caption={scene.get('caption')!r}", flush=True)
+            print(f"[VeoAgent]   scene {scene_id}/{len(scenes)}: avatar={scene.get('avatar')!r}  duration={scene['duration_seconds']}s", flush=True)
             print(f"[VeoAgent]   prompt: {scene['prompt'][:100]}...", flush=True)
 
-            # Offload blocking generation + polling to thread pool
-            video_bytes = await asyncio.to_thread(_generate_clip, client, scene, avatar_img, job_id)
-            print(f"[VeoAgent]   scene {scene_id} ✅ downloaded {len(video_bytes):,} bytes", flush=True)
+            async with semaphore:
+                print(f"[VeoAgent]   scene {scene_id} → slot acquired, submitting to Veo", flush=True)
+                video_bytes = await asyncio.to_thread(_generate_clip, client, scene, avatar_img, job_id)
 
+            print(f"[VeoAgent]   scene {scene_id} ✅ {len(video_bytes):,} bytes", flush=True)
             clip_path = save_upload(job_id, f"clip_{scene_id:02d}.mp4", video_bytes)
-            clips.append({
+            return {
                 "scene_id": scene_id,
                 "clip_path": clip_path,
                 "duration_seconds": scene["duration_seconds"],
-                "type": scene["type"],
                 "caption": scene.get("caption", ""),
-            })
+            }
 
-            print(f"  [VeoAgent] Scene {scene_id} saved → {clip_path}")
+        # Fire all scenes concurrently (capped by semaphore), preserve scene order
+        clip_results = await asyncio.gather(*[generate_scene(s) for s in scenes])
+        clips = sorted(clip_results, key=lambda c: c["scene_id"])
 
         ctx.session.state["veo_clips"] = clips
         update_job(job_id, step="stitching", veo_clips=clips)

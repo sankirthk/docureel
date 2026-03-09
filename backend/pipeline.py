@@ -6,31 +6,45 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from agents.parser import parser_agent
-from agents.knowledge_base import knowledge_base_agent
-from agents.video_script import video_script_agent
-from agents.veo import veo_agent
-from agents.stitcher import stitcher_agent
+from agents.parser import ParserAgent
+from agents.knowledge_base import KnowledgeBaseAgent
+from agents.video_script import VideoScriptAgent
+from agents.veo import VeoAgent
+from agents.stitcher import StitcherAgent
 from tools.job_store import update_job, get_job
 from tools.storage import load_cache, save_cache
 
 APP_NAME = "nevertrtfm"
 
+
 def _build_full_pipeline():
+    """
+    ParserAgent + KnowledgeBaseAgent run truly in parallel via ParallelAgent.
+    Both now use asyncio.to_thread internally so the event loop is not blocked.
+    Fresh agent instances every call — ADK sets a parent pointer that prevents reuse.
+    """
     ingestion = ParallelAgent(
         name="Ingestion",
-        sub_agents=[parser_agent, knowledge_base_agent],
+        sub_agents=[
+            ParserAgent(name="ParserAgent"),
+            KnowledgeBaseAgent(name="KnowledgeBaseAgent"),
+        ],
     )
     return SequentialAgent(
         name="NeverRTFM",
-        sub_agents=[ingestion, video_script_agent, veo_agent, stitcher_agent],
+        sub_agents=[
+            ingestion,
+            VideoScriptAgent(name="VideoScriptAgent"),
+            VeoAgent(name="VeoAgent"),
+            StitcherAgent(name="StitcherAgent"),
+        ],
     )
 
 
-def _build_video_only_pipeline():
+def _build_veo_only_pipeline():
     return SequentialAgent(
-        name="NeverRTFM_VideoOnly",
-        sub_agents=[veo_agent, stitcher_agent],
+        name="NeverRTFM_VeoOnly",
+        sub_agents=[VeoAgent(name="VeoAgent"), StitcherAgent(name="StitcherAgent")],
     )
 
 
@@ -41,67 +55,57 @@ async def run_pipeline(job_id: str, file_path: str, pdf_bytes: bytes):
         print(f"\n[pipeline] ▶ Starting pipeline for job {job_id}", flush=True)
         print(f"[pipeline]   file: {file_path}  pdf_hash: {pdf_hash[:16]}...", flush=True)
 
-        # Check cache — fastest path first
+        # ── Full cache hit: return existing video immediately ──────────────────
         cached_final = load_cache(pdf_hash, "final_video")
         if cached_final and cached_final.get("uri"):
-            final_uri = cached_final["uri"]
             from pathlib import Path
-            if final_uri.startswith("/") and not Path(final_uri).exists():
+            uri = cached_final["uri"]
+            if uri.startswith("/") and not Path(uri).exists():
                 print(f"[pipeline] ⚠ Cached final video missing from disk, re-generating", flush=True)
                 cached_final = None
 
         if cached_final and cached_final.get("uri"):
-            final_uri = cached_final["uri"]
-            print(f"[pipeline] ⚡ Full cache hit — returning existing video instantly", flush=True)
-            print(f"[pipeline]   uri: {final_uri}", flush=True)
-            cached_manifest = load_cache(pdf_hash, "manifest")
+            print(f"[pipeline] ⚡ Full cache hit — done instantly", flush=True)
             update_job(job_id, status="done", step="complete",
-                       video_url=final_uri, final_video_uri=final_uri,
-                       manifest=cached_manifest)
+                       video_url=cached_final["uri"], final_video_uri=cached_final["uri"],
+                       manifest=load_cache(pdf_hash, "manifest"))
             return
 
         cached_manifest = load_cache(pdf_hash, "manifest")
         cached_video_script = load_cache(pdf_hash, "video_script")
-        cache_hit = cached_manifest is not None and cached_video_script is not None
+        has_script_cache = cached_manifest is not None and cached_video_script is not None
 
-        if cache_hit:
-            print(f"[pipeline] ⚡ Cache hit — skipping parse + script, jumping to Veo", flush=True)
-            agent = _build_video_only_pipeline()
+        if has_script_cache:
+            print(f"[pipeline] ⚡ Script cache hit — skipping ingestion, jumping to Veo", flush=True)
+            agent = _build_veo_only_pipeline()
             initial_step = "veo"
         else:
-            print(f"[pipeline]   No cache — running full pipeline", flush=True)
+            print(f"[pipeline]   No cache — running full pipeline (Parser ∥ KnowledgeBase → VideoScript → Veo [all presenter] → Stitcher)", flush=True)
             agent = _build_full_pipeline()
             initial_step = "parsing"
 
         update_job(job_id, status="processing", step=initial_step)
 
         session_service = InMemorySessionService()
-
-        initial_state = {
+        initial_state: dict = {
             "job_id": job_id,
             "file_path": file_path,
             "pdf_hash": pdf_hash,
         }
-        if cache_hit:
+        if has_script_cache:
             initial_state["manifest"] = cached_manifest
             initial_state["video_script"] = cached_video_script
-            print(f"[pipeline]   Loaded manifest ({len(cached_manifest.get('key_sections', []))} sections) and video_script ({len(cached_video_script.get('scenes', []))} scenes) from cache", flush=True)
+            print(f"[pipeline]   Loaded manifest + video_script ({len(cached_video_script.get('scenes', []))} scenes) from cache", flush=True)
 
-        # Create a session with initial state — agents read/write via ctx.session.state
-        session = await session_service.create_session(
+        await session_service.create_session(
             app_name=APP_NAME,
             user_id=job_id,
             session_id=job_id,
             state=initial_state,
         )
 
-        runner = Runner(
-            agent=agent,
-            app_name=APP_NAME,
-            session_service=session_service,
-        )
+        runner = Runner(agent=agent, app_name=APP_NAME, session_service=session_service)
 
-        # Drain the event stream — agents update job_store internally as they run
         async for event in runner.run_async(
             user_id=job_id,
             session_id=job_id,
@@ -113,23 +117,17 @@ async def run_pipeline(job_id: str, file_path: str, pdf_bytes: bytes):
             if event.content:
                 print(f"  [{event.author}] {event.content}")
 
-        # Read final state from session
+        # ── Finalise ───────────────────────────────────────────────────────────
         final_session = await session_service.get_session(
-            app_name=APP_NAME,
-            user_id=job_id,
-            session_id=job_id,
+            app_name=APP_NAME, user_id=job_id, session_id=job_id,
         )
         state = final_session.state
 
-        # Session state may not reflect agent writes (ADK InMemorySessionService quirk),
-        # so fall back to the job store where StitcherAgent writes directly.
         final_uri = state.get("final_video_uri") or (get_job(job_id) or {}).get("final_video_uri")
         if final_uri:
             save_cache(pdf_hash, "final_video", {"uri": final_uri})
-            print(f"[pipeline]   Cached final video for future runs", flush=True)
 
-        print(f"\n[pipeline] ✅ Pipeline complete for job {job_id}", flush=True)
-        print(f"[pipeline]   final_video_uri: {final_uri}", flush=True)
+        print(f"\n[pipeline] ✅ Complete — final_uri: {final_uri}", flush=True)
         update_job(
             job_id,
             status="done",

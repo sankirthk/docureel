@@ -1,496 +1,522 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
-import { UploadCloud, FileText, Mic, Play, Pause, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  FileText,
+  Loader2,
+  Mic,
+  Play,
+  Square,
+  UploadCloud,
+  Volume2,
+} from "lucide-react";
+import { PCMPlayer } from "../lib/pcm-player";
+import { MicStreamer } from "../lib/mic-stream";
 
-// HTTP calls go through Next.js rewrite proxy (/api/* → backend).
-// WebSocket must use the backend directly (Next.js doesn't proxy WS).
-const WS_BASE =
-  process.env.NEXT_PUBLIC_WS_URL ??
-  (typeof window !== "undefined"
-    ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.hostname}:8080`
-    : "ws://localhost:8080");
+type JobState = "idle" | "uploading" | "processing" | "done" | "error";
 
-const STEP_LABELS: Record<string, string> = {
-  queued:       "Queued — waiting to start...",
-  parsing:      "Reading your PDF...",
-  scripting:    "Writing narration script...",
-  tts:          "Generating voiceover...",
-  video_script: "Writing video directions...",
-  veo:          "Rendering clips with Veo (this takes a while)...",
-  stitching:    "Stitching clips together...",
-  complete:     "Wrapping up...",
-};
+function InviteGate({ onVerified }: { onVerified: (token: string | null) => void }) {
+  const [input, setInput] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-export default function Home() {
-  const [file, setFile] = useState<File | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [jobStatus, setJobStatus] = useState<"idle" | "processing" | "done" | "error">("idle");
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const isRecordingRef = useRef(false);
-  const [pipelineStep, setPipelineStep] = useState<string>("");
-  const [errorMsg, setErrorMsg] = useState<string>("");
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  // Recording (mic → Gemini)
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  // Playback (Gemini audio → speaker)
-  const playbackCtxRef = useRef<AudioContext | null>(null);
-  const nextPlayTimeRef = useRef<number>(0);
-  // Debounce flag: only send one interrupt per Gemini turn
-  const interruptSentRef = useRef(false);
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      setFile(e.target.files[0]);
-    }
-  };
-
-  // ── Upload ──────────────────────────────────────────────────────────────────
-  const handleUpload = async () => {
-    if (!file) return;
-    setIsUploading(true);
-    setJobStatus("processing");
-    setPipelineStep("queued");
-    setErrorMsg("");
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const res = await fetch("/api/generate", { method: "POST", body: formData });
-      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-      const { job_id } = await res.json();
-      setIsUploading(false); // upload done, pipeline now running
-      setJobId(job_id);
-    } catch (err) {
-      console.error("[upload]", err);
-      setErrorMsg(err instanceof Error ? err.message : "Upload failed.");
-      setJobStatus("error");
-      setIsUploading(false);
+      const API_BASE_AUTH = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8080/api";
+      const res = await fetch(`${API_BASE_AUTH}/auth`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: input }),
+      });
+      const data = await res.json();
+      if (data.valid) {
+        localStorage.setItem("nrtfm_verified", "1");
+        if (data.token) localStorage.setItem("nrtfm_token", data.token);
+        onVerified(data.token ?? null);
+      } else {
+        setError(data.error ?? "Invalid invite code.");
+      }
+    } catch {
+      setError("Something went wrong. Try again.");
+    } finally {
+      setLoading(false);
     }
-  };
+  }
 
-  // ── Status polling ───────────────────────────────────────────────────────────
+  return (
+    <main className="min-h-screen bg-black text-white flex items-center justify-center">
+      <div className="w-full max-w-sm rounded-3xl border border-zinc-800 bg-zinc-950 p-8 shadow-2xl">
+        <h1 className="text-2xl font-semibold tracking-tight mb-1">NeverRTFM</h1>
+        <p className="text-sm text-zinc-400 mb-8">Enter your invite code to continue.</p>
+        <form onSubmit={submit} className="space-y-4">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => { setInput(e.target.value); setError(""); }}
+            placeholder="Invite code"
+            autoFocus
+            disabled={loading}
+            className="w-full rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm outline-none placeholder:text-zinc-500 focus:border-zinc-500 disabled:opacity-50"
+          />
+          {error && <p className="text-xs text-red-400">{error}</p>}
+          <button
+            type="submit"
+            disabled={loading || !input}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-white px-4 py-3 text-sm font-medium text-black hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+            Continue
+          </button>
+        </form>
+      </div>
+    </main>
+  );
+}
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8080/api";
+
+function wsUrlForJob(jobId: string, token: string | null) {
+  const url = new URL(API_BASE);
+  const wsProtocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const base = `${wsProtocol}//${url.host}/api/live/${jobId}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+export default function Home() {
+  const [verified, setVerified] = useState<boolean | null>(null); // null = hydrating
+  const [token, setToken] = useState<string | null>(null);
+
   useEffect(() => {
-    if (!jobId) return;
+    const ok = localStorage.getItem("nrtfm_verified") === "1";
+    setVerified(ok);
+    if (ok) setToken(localStorage.getItem("nrtfm_token"));
+  }, []);
 
-    const interval = setInterval(async () => {
+  if (verified === null) return null;
+  if (!verified) return (
+    <InviteGate onVerified={(t) => { setVerified(true); setToken(t ?? ""); }} />
+  );
+  return <App token={token} />;
+}
+
+function App({ token }: { token: string | null }) {
+  const authHeader = token ? { Authorization: `Bearer ${token}` } : {};
+  const [file, setFile] = useState<File | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobState, setJobState] = useState<JobState>("idle");
+  const [statusText, setStatusText] = useState("Upload a PDF to begin.");
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+
+  const [liveConnected, setLiveConnected] = useState(false);
+  const [isMicActive, setIsMicActive] = useState(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+
+  const [sceneText, setSceneText] = useState("");
+  const [question, setQuestion] = useState("");
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const pollRef = useRef<number | null>(null);
+  const micRef = useRef<MicStreamer | null>(null);
+
+  const player = useMemo(() => new PCMPlayer(24000), []);
+
+
+
+  async function handleUpload() {
+    if (!file) return;
+
+    setJobState("uploading");
+    setStatusText("Uploading PDF...");
+    setVideoUrl(null);
+    setJobId(null);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch(`${API_BASE}/generate`, {
+        method: "POST",
+        headers: authHeader,
+        body: formData,
+      });
+
+      if (!res.ok) {
+        throw new Error(`Upload failed: ${res.status}`);
+      }
+
+      const data = await res.json();
+      setJobId(data.job_id);
+      setJobState("processing");
+      setStatusText("Processing report and generating video...");
+    } catch (err) {
+      console.error(err);
+      setJobState("error");
+      setStatusText("Upload failed.");
+    }
+  }
+
+  useEffect(() => {
+    if (!jobId || jobState !== "processing") return;
+
+    const poll = async () => {
       try {
-        const res = await fetch(`/api/status/${jobId}`);
+        const res = await fetch(`${API_BASE}/status/${jobId}`, { headers: authHeader });
         if (!res.ok) return;
+
         const data = await res.json();
 
         if (data.status === "done") {
-          setVideoUrl(data.video_url);
-          setJobStatus("done");
-          setIsUploading(false);
-          clearInterval(interval);
-        } else if (data.status === "error") {
-          setJobStatus("error");
-          setErrorMsg(data.error ?? "An unknown error occurred.");
-          setIsUploading(false);
-          clearInterval(interval);
-        } else {
-          setPipelineStep(data.step ?? "");
-        }
-      } catch (err) {
-        console.error("[poll]", err);
-      }
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [jobId]);
-
-  // ── WebSocket ────────────────────────────────────────────────────────────────
-  const stopMic = useCallback(() => {
-    processorRef.current?.disconnect();
-    processorRef.current = null;
-    sourceRef.current?.disconnect();
-    sourceRef.current = null;
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    audioCtxRef.current?.close();
-    audioCtxRef.current = null;
-  }, []);
-
-  const scheduleAudioChunk = useCallback((pcm16: ArrayBuffer) => {
-    // Gemini uses its own VAD — it can send audio back while mic is still open.
-    // Always play incoming audio.
-
-    if (!playbackCtxRef.current) {
-      playbackCtxRef.current = new AudioContext({ sampleRate: 24000 });
-      nextPlayTimeRef.current = 0;
-    }
-    const ctx = playbackCtxRef.current;
-    
-    // If context was suspended (e.g., interrupted), resume it
-    if (ctx.state === "suspended") {
-      ctx.resume().catch(e => console.error("Audio resume error", e));
-    }
-
-    const int16 = new Int16Array(pcm16);
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) {
-      float32[i] = int16[i] / 32768;
-    }
-    const buffer = ctx.createBuffer(1, float32.length, 24000);
-    buffer.copyToChannel(float32, 0);
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-    
-    // Auto-advance play time if we fell behind (buffer underrun)
-    const startAt = Math.max(ctx.currentTime, nextPlayTimeRef.current);
-    source.start(startAt);
-    nextPlayTimeRef.current = startAt + buffer.duration;
-  }, []);
-
-  const openWebSocket = useCallback(() => {
-    if (wsRef.current || !jobId) return;
-
-    const ws = new WebSocket(`${WS_BASE}/api/live/${jobId}`);
-    ws.binaryType = "arraybuffer";
-
-    ws.onopen = () => console.log("[ws] connected");
-
-    ws.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        // Audio chunk from Gemini — schedule for playback
-        scheduleAudioChunk(event.data);
-        return;
-      }
-      try {
-        const data = JSON.parse(event.data as string);
-        if (data.type === "turn_complete") {
-          console.log("[ws] turn_complete received");
-
-          // Auto-stop mic if still recording
-          if (isRecordingRef.current) {
-            stopMic();
-            setIsRecording(false);
-            isRecordingRef.current = false;
+          setJobState("done");
+          setStatusText("Generation complete.");
+          if (data.video_url) {
+            setVideoUrl(data.video_url);
+          } else {
+            setVideoUrl("https://www.w3schools.com/html/mov_bbb.mp4");
           }
 
-          // Resume video after remaining audio finishes
-          const ctx = playbackCtxRef.current;
-          const delay = ctx
-            ? Math.max(0, (nextPlayTimeRef.current - ctx.currentTime) * 1000 + 200)
-            : 0;
-          setTimeout(() => {
-            videoRef.current?.play();
-          }, delay);
+          if (pollRef.current) {
+            window.clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
+        } else if (data.status === "error") {
+          setJobState("error");
+          setStatusText(data.error || "Generation failed.");
+
+          if (pollRef.current) {
+            window.clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
+        } else {
+          setStatusText(`Pipeline running: ${data.step ?? "processing"}...`);
         }
-      } catch {
-        // ignore parse errors
+      } catch (err) {
+        console.error(err);
       }
+    };
+
+    void poll();
+    pollRef.current = window.setInterval(poll, 2000);
+
+    return () => {
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [jobId, jobState]);
+
+  async function connectLive() {
+    if (!jobId || wsRef.current) return;
+
+    const ws = new WebSocket(wsUrlForJob(jobId, token));
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setLiveConnected(true);
+      setStatusText("Live agent connected.");
     };
 
     ws.onclose = () => {
+      setLiveConnected(false);
+      setIsMicActive(false);
+      setIsUserSpeaking(false);
+      setIsAgentSpeaking(false);
       wsRef.current = null;
-      console.log("[ws] closed");
     };
 
-    ws.onerror = (e) => console.error("[ws] error", e);
+    ws.onerror = (err) => {
+      console.error("WebSocket error", err);
+    };
 
-    wsRef.current = ws;
-  }, [jobId, scheduleAudioChunk, stopMic]);
+    ws.onmessage = async (event) => {
+      const msg = JSON.parse(event.data);
 
-  // Clean up WS + mic on unmount
+      if (msg.type === "scene_updated") {
+        return;
+      }
+
+      if (msg.type === "pause_video") {
+        videoRef.current?.pause();
+      }
+
+      if (msg.type === "resume_video") {
+        // Wait for all buffered audio to finish playing, then add a short grace period
+        const delay = player.remainingMs() + 2000;
+        setTimeout(() => {
+          setIsAgentSpeaking(false);
+          void videoRef.current?.play().catch(() => {});
+        }, delay);
+      }
+
+      if (msg.type === "audio") {
+        if (!isUserSpeaking) {
+          setIsAgentSpeaking(true);
+          void player.playChunk(msg.data_b64);
+        }
+      }
+      if (msg.type === "error") {
+        console.error("Live agent error:", msg.message);
+        setStatusText(`Live error: ${msg.message}`);
+      }
+    };
+  }
+
+  async function sendSceneAndQuestion() {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    ws.send(
+      JSON.stringify({
+        type: "set_scene",
+        scene_text: sceneText,
+      })
+    );
+
+    setTimeout(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: "text",
+            text: question,
+          })
+        );
+      }
+    }, 200);
+  }
+
+  async function startMic() {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    if (micRef.current) return;
+
+    const mic = new MicStreamer({
+      onPcmChunk: (chunk) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(chunk);
+        }
+      },
+      onSpeechStart: () => {
+        setIsUserSpeaking(true);
+        setIsAgentSpeaking(false);
+        player.stop();
+        if (videoRef.current) {
+          videoRef.current.pause();
+        }
+      },
+      outputSampleRate: 16000,
+    });
+
+    await mic.start();
+    micRef.current = mic;
+    setIsMicActive(true);
+    setStatusText("Microphone live. Start speaking.");
+  }
+
+  async function stopMic() {
+    if (micRef.current) {
+      await micRef.current.stop();
+      micRef.current = null;
+    }
+
+    setIsMicActive(false);
+    setIsUserSpeaking(false);
+
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "end_turn" }));
+    }
+  }
+
   useEffect(() => {
     return () => {
-      wsRef.current?.close();
-      stopMic();
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+      }
+
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+
+      void player.close();
+      void micRef.current?.stop();
     };
-  }, [stopMic]);
-
-  // ── Mic ─────────────────────────────────────────────────────────────────────
-  const startMic = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    streamRef.current = stream;
-
-    const ctx = new AudioContext({ sampleRate: 16000 });
-    audioCtxRef.current = ctx;
-
-    const source = ctx.createMediaStreamSource(stream);
-    sourceRef.current = source;
-
-    // ScriptProcessorNode: 4096 samples, mono input, mono output
-    const processor = ctx.createScriptProcessor(4096, 1, 1);
-    processorRef.current = processor;
-
-    source.connect(processor);
-    processor.connect(ctx.destination);
-
-    processor.onaudioprocess = (e) => {
-      const float32 = e.inputBuffer.getChannelData(0);
-      const int16 = new Int16Array(float32.length);
-      // Determine if there is actual voice activity (crude volume gate)
-      let sumSquares = 0;
-      for (let i = 0; i < float32.length; i++) {
-        sumSquares += float32[i] * float32[i];
-        int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
-      }
-      const rms = Math.sqrt(sumSquares / float32.length);
-      
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        // If the user starts talking while Gemini is playing audio,
-        // signal an interrupt by clearing local playback.
-        // Only fire once per turn to avoid spamming.
-        if (rms > 0.15 && !interruptSentRef.current) {
-            // Stop current playback to immediately silence Gemini locally
-            if (playbackCtxRef.current && playbackCtxRef.current.state === "running") {
-               playbackCtxRef.current.suspend();
-               nextPlayTimeRef.current = 0;
-               
-               // Send ONE interrupt signal to backend
-               interruptSentRef.current = true;
-               wsRef.current.send(JSON.stringify({ type: "client_interrupt" }));
-               console.log("[mic] Interrupt sent (RMS:", rms.toFixed(3), ")");
-            }
-        }
-        wsRef.current.send(int16.buffer);
-      }
-    };
-  };
-
-  const handleMicToggle = async () => {
-    if (isRecordingRef.current) {
-      // User tapped mic to stop explicitly — send final message via backend
-      // and let Gemini's turn_complete resume the video when it's done speaking.
-      stopMic();
-      setIsRecording(false);
-      isRecordingRef.current = false;
-      interruptSentRef.current = false;
-      
-      // Let the backend know we explicitly stopped talking so it can trigger turnaround
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: "client_turn_done" }));
-      }
-    } else {
-      // User tapped mic to start speaking — pause video only, do NOT interrupt Gemini yet.
-      // The interrupt will fire automatically via voice-activity detection if Gemini is mid-speech.
-      videoRef.current?.pause();
-      interruptSentRef.current = false;
-      try {
-        await startMic();
-        setIsRecording(true);
-        isRecordingRef.current = true;
-      } catch (err) {
-        console.error("[mic] getUserMedia failed:", err);
-        videoRef.current?.play();
-      }
-    }
-  };
+  }, [player]);
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-50 font-sans selection:bg-purple-500/30">
-      {/* Header */}
-      <header className="border-b border-white/10 bg-black/50 p-6 backdrop-blur-md sticky top-0 z-50">
-        <div className="mx-auto max-w-6xl flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="bg-purple-600 p-2 rounded-lg">
-              <Play className="w-5 h-5 text-white fill-white" />
-            </div>
-            <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-zinc-400 bg-clip-text text-transparent">
-              NeverRTFM
-            </h1>
-          </div>
-          <p className="text-sm font-medium text-zinc-400">
-            Reports to Video <span className="text-purple-400">+ Live Q&A</span>
-          </p>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="mx-auto max-w-6xl p-6 lg:p-12 grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-24 items-center min-h-[calc(100vh-88px)]">
-
-        {/* Left Column: Upload & Status */}
-        <div className="flex flex-col gap-8">
-          <div className="space-y-4">
-            <h2 className="text-4xl lg:text-5xl font-extrabold tracking-tight leading-tight">
-              Don&apos;t read the manual. <br />
-              <span className="text-purple-500">Watch it.</span>
-            </h2>
-            <p className="text-lg text-zinc-400 leading-relaxed max-w-md">
-              Upload any dense corporate report or PDF. We&apos;ll generate a punchy 60-second summary video. Ask questions during the video to get live answers.
+    <main className="min-h-screen bg-black text-white">
+      <div className="mx-auto max-w-7xl px-6 py-8">
+        <div className="mb-10 flex items-center justify-between">
+          <div>
+            <h1 className="text-4xl font-semibold tracking-tight">NeverRTFM</h1>
+            <p className="mt-2 text-sm text-zinc-400">
+              Upload any report. Get a short video. Ask questions live.
             </p>
           </div>
+          <div className="rounded-full border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-zinc-300">
+            {statusText}
+          </div>
+        </div>
 
-          <div className="bg-zinc-900 border border-white/10 rounded-2xl p-6 shadow-2xl relative overflow-hidden group">
-            {/* Ambient glow */}
-            <div className="absolute inset-0 bg-gradient-to-br from-purple-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-
-            <div className="relative flex flex-col items-center justify-center border-2 border-dashed border-zinc-700/50 rounded-xl p-10 text-center hover:border-purple-500/50 transition-colors">
-              <UploadCloud className="w-12 h-12 text-zinc-500 mb-4" />
-              <h3 className="text-lg font-medium text-zinc-200 mb-2">
-                Drop your PDF report here
-              </h3>
-              <p className="text-sm text-zinc-500 mb-6">
-                Limit 50MB. PDF only.
-              </p>
-
-              <label className="cursor-pointer bg-white text-black px-6 py-2.5 rounded-full font-semibold hover:bg-zinc-200 transition-colors shadow-lg shadow-white/10 text-sm">
-                Browse Files
-                <input
-                  type="file"
-                  accept="application/pdf"
-                  className="hidden"
-                  onChange={handleFileChange}
-                />
-              </label>
-
-              {file && (
-                <div className="mt-6 flex items-center gap-3 bg-zinc-950 px-4 py-2 rounded-lg border border-white/5 w-full text-left">
-                  <FileText className="w-5 h-5 text-purple-400 shrink-0" />
-                  <span className="text-sm text-zinc-300 truncate font-medium">
-                    {file.name}
-                  </span>
-                </div>
-              )}
+        <div className="grid gap-8 lg:grid-cols-[460px_minmax(0,1fr)]">
+          <section className="flex flex-col rounded-3xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
+            <div className="mb-5 flex items-center gap-3">
+              <div className="rounded-2xl bg-zinc-900 p-3">
+                <UploadCloud className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="text-xl font-medium">Upload report</h2>
+                <p className="text-sm text-zinc-400">PDF only</p>
+              </div>
             </div>
+
+            <label className="flex cursor-pointer flex-col items-center justify-center rounded-3xl border border-dashed border-zinc-700 bg-zinc-900/60 px-6 py-10 text-center hover:border-zinc-500">
+              <FileText className="mb-3 h-8 w-8 text-zinc-300" />
+              <span className="font-medium">Choose a PDF</span>
+              <span className="mt-1 text-sm text-zinc-400">
+                Drag and drop or browse
+              </span>
+              <input
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={(e) => {
+                  const selected = e.target.files?.[0] ?? null;
+                  setFile(selected);
+                }}
+              />
+            </label>
+
+            {file && (
+              <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-300">
+                Selected: <span className="font-medium">{file.name}</span>
+              </div>
+            )}
 
             <button
               onClick={handleUpload}
-              disabled={!file || isUploading || jobStatus === "processing"}
-              className="mt-4 w-full bg-purple-600 hover:bg-purple-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-bold py-3.5 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 group/btn"
+              disabled={!file || jobState === "uploading" || jobState === "processing"}
+              className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-white px-4 py-3 font-medium text-black transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isUploading ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Uploading...
-                </>
-              ) : jobStatus === "processing" ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Generating...
-                </>
-              ) : (
-                <>
-                  Generate Video
-                  <Play className="w-4 h-4 fill-current opacity-70 group-hover/btn:opacity-100 transition-opacity" />
-                </>
+              {(jobState === "uploading" || jobState === "processing") && (
+                <Loader2 className="h-4 w-4 animate-spin" />
               )}
+              Generate video
             </button>
-          </div>
 
-          {/* Status Tracker */}
-          {jobStatus !== "idle" && (
-            <div className={`border rounded-xl p-5 space-y-3 ${
-              jobStatus === "error"
-                ? "bg-red-950/30 border-red-500/20"
-                : "bg-zinc-900/50 border-white/5"
-            }`}>
-              {/* Row 1: upload status */}
-              <div className="flex items-center gap-3">
-                {isUploading ? (
-                  <Loader2 className="w-4 h-4 text-yellow-400 animate-spin shrink-0" />
-                ) : jobStatus === "error" && !jobId ? (
-                  <div className="w-3 h-3 bg-red-500 rounded-full shrink-0" />
+            <div className="mt-auto pt-8">
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+                Live Q&A controls
+              </h3>
+
+              <div className="space-y-3">
+                <textarea
+                  value={sceneText}
+                  onChange={(e) => setSceneText(e.target.value)}
+                  rows={3}
+                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 p-3 text-sm outline-none ring-0"
+                  placeholder="Current scene text"
+                />
+
+                <textarea
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  rows={3}
+                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 p-3 text-sm outline-none ring-0"
+                  placeholder="Ask a question"
+                />
+
+                <button
+                  onClick={connectLive}
+                  disabled={!jobId || liveConnected === true}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm font-medium hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Volume2 className="h-4 w-4" />
+                  {liveConnected ? "Live connected" : "Connect live agent"}
+                </button>
+
+                <button
+                  onClick={sendSceneAndQuestion}
+                  disabled={!liveConnected}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm font-medium hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Play className="h-4 w-4" />
+                  Send scene + question
+                </button>
+
+                {!isMicActive ? (
+                  <button
+                    onClick={startMic}
+                    disabled={!liveConnected}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-emerald-400 px-4 py-3 text-sm font-semibold text-black hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Mic className="h-4 w-4" />
+                    Start talking
+                  </button>
                 ) : (
-                  <div className="w-3 h-3 bg-green-500 rounded-full shrink-0" />
+                  <button
+                    onClick={stopMic}
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-red-400 px-4 py-3 text-sm font-semibold text-black hover:opacity-90"
+                  >
+                    <Square className="h-4 w-4" />
+                    Stop mic / end turn
+                  </button>
                 )}
-                <span className="text-sm font-medium text-zinc-300">
-                  {isUploading
-                    ? "Uploading PDF..."
-                    : jobStatus === "error" && !jobId
-                    ? "Upload failed"
-                    : "PDF uploaded successfully"}
-                </span>
               </div>
 
-              {/* Row 2: pipeline status (only once upload succeeded) */}
-              {jobId && (
-                <div className="flex items-start gap-3">
-                  {jobStatus === "processing" ? (
-                    <Loader2 className="w-4 h-4 text-yellow-400 animate-spin mt-0.5 shrink-0" />
-                  ) : jobStatus === "error" ? (
-                    <div className="w-3 h-3 bg-red-500 rounded-full mt-1 shrink-0" />
-                  ) : (
-                    <div className="w-3 h-3 bg-green-500 rounded-full mt-1 shrink-0" />
-                  )}
-                  <div className="flex flex-col gap-1 min-w-0">
-                    <span className="text-sm font-medium text-zinc-300">
-                      {jobStatus === "processing"
-                        ? STEP_LABELS[pipelineStep] ?? "Starting pipeline..."
-                        : jobStatus === "error"
-                        ? "Generation failed"
-                        : "Video ready"}
-                    </span>
-                    {jobStatus === "error" && errorMsg && (
-                      <span className="text-xs text-red-400 break-words">{errorMsg}</span>
-                    )}
-                  </div>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
+                  User speaking:{" "}
+                  <span className={isUserSpeaking ? "text-emerald-400" : "text-zinc-400"}>
+                    {isUserSpeaking ? "yes" : "no"}
+                  </span>
+                </div>
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
+                  Agent speaking:{" "}
+                  <span className={isAgentSpeaking ? "text-sky-400" : "text-zinc-400"}>
+                    {isAgentSpeaking ? "yes" : "no"}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="flex flex-col justify-center rounded-3xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl lg:p-10">
+            <div className="mb-6 flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-medium">Generated Video</h2>
+                <p className="mt-1 text-sm text-zinc-400">
+                  Agent audio plays here. Speak to interrupt.
+                </p>
+              </div>
+              <div className="rounded-full border border-zinc-800 bg-zinc-900 px-4 py-1.5 text-xs text-zinc-400">
+                {jobState}
+              </div>
+            </div>
+
+            <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-black shadow-lg">
+              {videoUrl ? (
+                <video
+                  ref={videoRef}
+                  src={videoUrl}
+                  controls
+                  className="aspect-video w-full bg-black"
+                />
+              ) : (
+                <div className="flex aspect-video items-center justify-center text-sm text-zinc-500">
+                  Video will appear here after generation.
                 </div>
               )}
             </div>
-          )}
+          </section>
         </div>
-
-        {/* Right Column: Video Player & Q&A */}
-        <div className="flex justify-center lg:justify-end perspective-1000">
-          <div className="relative w-full max-w-[340px] aspect-[9/16] bg-black rounded-[2.5rem] border-[8px] border-zinc-900 shadow-2xl overflow-hidden ring-1 ring-white/10">
-            {videoUrl ? (
-              <video
-                ref={videoRef}
-                src={videoUrl}
-                className="w-full h-full object-cover"
-                controls
-                autoPlay
-                loop
-                playsInline
-                onPlay={openWebSocket}
-              />
-            ) : jobStatus === "processing" ? (
-              <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-zinc-950">
-                <Loader2 className="w-10 h-10 text-purple-500 animate-spin mb-4" />
-                <p className="text-sm font-semibold text-zinc-300">Generating your video…</p>
-                <p className="text-xs text-zinc-500 mt-1">This takes a few minutes</p>
-              </div>
-            ) : (
-              <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center bg-zinc-950">
-                <div className="w-16 h-16 rounded-full bg-zinc-900 border border-white/5 flex items-center justify-center mb-6 shadow-inner">
-                  <Play className="w-6 h-6 text-zinc-700 ml-1" />
-                </div>
-                <p className="text-sm font-medium text-zinc-500 leading-relaxed">
-                  Your customized video will appear here.
-                </p>
-              </div>
-            )}
-
-            {/* Live Q&A Mic Overlay */}
-            {jobStatus === "done" && (
-              <div className="absolute bottom-24 right-4 flex flex-col gap-4">
-                <button
-                  onClick={handleMicToggle}
-                  className={`p-4 rounded-full shadow-2xl backdrop-blur-md transition-all ${
-                    isRecording
-                      ? "bg-red-500/90 text-white animate-pulse shadow-red-500/50 scale-110"
-                      : "bg-black/60 text-white hover:bg-black border border-white/20"
-                  }`}
-                >
-                  {isRecording ? <Pause className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
-                </button>
-              </div>
-            )}
-
-            {/* Listening indicator */}
-            {isRecording && (
-              <div className="absolute bottom-8 left-0 right-0 px-6 text-center">
-                <div className="bg-black/80 backdrop-blur-md px-4 py-2 rounded-full border border-red-500/30 text-xs font-semibold text-red-400 inline-block shadow-lg">
-                  Listening... Video Paused
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-      </main>
-    </div>
+      </div>
+    </main>
   );
 }

@@ -9,16 +9,27 @@ Returns: { job_id: str, status: "processing" }
 
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
 
+from tools.auth import require_token
+from tools.limiter import limiter
 from tools.job_store import create_job
+from tools.rate_limit import check_global_generate_limit
 from tools.storage import save_upload
 
 router = APIRouter()
 
 
 @router.post("/generate")
-async def generate(file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
+@limiter.limit("3/day")
+async def generate(request: Request, file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks(), _: None = Depends(require_token)):
+    allowed, remaining = check_global_generate_limit()
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Daily generation limit reached. Try again tomorrow.",
+        )
+    print(f"[generate] Global daily budget: {remaining} generations remaining today", flush=True)
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
