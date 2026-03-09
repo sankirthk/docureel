@@ -12,7 +12,6 @@ WORKDIR /app
 
 # Copy dependency files
 COPY pyproject.toml .
-COPY .env.example .env
 
 # Install dependencies with uv
 RUN uv pip install --system -e .
