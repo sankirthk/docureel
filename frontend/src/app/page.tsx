@@ -78,6 +78,7 @@ function InviteGate({ onVerified }: { onVerified: (token: string | null) => void
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8080/api";
+const MAX_PDF_PAGES = 20;
 
 function wsUrlForJob(jobId: string, token: string | null) {
   const url = new URL(API_BASE);
@@ -106,6 +107,7 @@ export default function Home() {
 function App({ token }: { token: string | null }) {
   const authHeader: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
   const [file, setFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [jobState, setJobState] = useState<JobState>("idle");
   const [statusText, setStatusText] = useState("Upload a PDF to begin.");
@@ -116,17 +118,17 @@ function App({ token }: { token: string | null }) {
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
 
-  const [sceneText, setSceneText] = useState("");
   const [question, setQuestion] = useState("");
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<number | null>(null);
   const micRef = useRef<MicStreamer | null>(null);
+  const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Ref mirrors for use inside stale closures (ws.onmessage)
+  const isUserSpeakingRef = useRef(false);
 
   const player = useMemo(() => new PCMPlayer(24000), []);
-
-
 
   async function handleUpload() {
     if (!file) return;
@@ -147,7 +149,8 @@ function App({ token }: { token: string | null }) {
       });
 
       if (!res.ok) {
-        throw new Error(`Upload failed: ${res.status}`);
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail ?? `Upload failed: ${res.status}`);
       }
 
       const data = await res.json();
@@ -157,7 +160,7 @@ function App({ token }: { token: string | null }) {
     } catch (err) {
       console.error(err);
       setJobState("error");
-      setStatusText("Upload failed.");
+      setStatusText(err instanceof Error ? err.message : "Upload failed.");
     }
   }
 
@@ -226,6 +229,7 @@ function App({ token }: { token: string | null }) {
       setLiveConnected(false);
       setIsMicActive(false);
       setIsUserSpeaking(false);
+      isUserSpeakingRef.current = false;
       setIsAgentSpeaking(false);
       wsRef.current = null;
     };
@@ -237,29 +241,41 @@ function App({ token }: { token: string | null }) {
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data);
 
-      if (msg.type === "scene_updated") {
-        return;
-      }
-
       if (msg.type === "pause_video") {
         videoRef.current?.pause();
       }
 
       if (msg.type === "resume_video") {
-        // Wait for all buffered audio to finish playing, then add a short grace period
-        const delay = player.remainingMs() + 2000;
-        setTimeout(() => {
-          setIsAgentSpeaking(false);
-          void videoRef.current?.play().catch(() => {});
-        }, delay);
+        // Cancel any pending resume
+        if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+
+        // Poll until PCMPlayer drains, then resume with a short grace period
+        const waitForDrain = () => {
+          const remaining = player.remainingMs();
+          if (remaining > 50) {
+            resumeTimerRef.current = setTimeout(waitForDrain, Math.min(remaining / 2, 300));
+          } else {
+            resumeTimerRef.current = setTimeout(() => {
+              setIsAgentSpeaking(false);
+              void videoRef.current?.play().catch(() => {});
+            }, 400);
+          }
+        };
+        waitForDrain();
       }
 
       if (msg.type === "audio") {
-        if (!isUserSpeaking) {
+        // Cancel any pending resume — more audio is still arriving
+        if (resumeTimerRef.current) {
+          clearTimeout(resumeTimerRef.current);
+          resumeTimerRef.current = null;
+        }
+        if (!isUserSpeakingRef.current) {
           setIsAgentSpeaking(true);
           void player.playChunk(msg.data_b64);
         }
       }
+
       if (msg.type === "error") {
         console.error("Live agent error:", msg.message);
         setStatusText(`Live error: ${msg.message}`);
@@ -267,33 +283,17 @@ function App({ token }: { token: string | null }) {
     };
   }
 
-  async function sendSceneAndQuestion() {
+  async function sendQuestion() {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !question.trim()) return;
 
-    ws.send(
-      JSON.stringify({
-        type: "set_scene",
-        scene_text: sceneText,
-      })
-    );
-
-    setTimeout(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            type: "text",
-            text: question,
-          })
-        );
-      }
-    }, 200);
+    ws.send(JSON.stringify({ type: "text", text: question }));
+    setQuestion("");
   }
 
   async function startMic() {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
     if (micRef.current) return;
 
     const mic = new MicStreamer({
@@ -303,8 +303,10 @@ function App({ token }: { token: string | null }) {
         }
       },
       onSpeechStart: () => {
+        isUserSpeakingRef.current = true;
         setIsUserSpeaking(true);
         setIsAgentSpeaking(false);
+        if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
         player.stop();
         if (videoRef.current) {
           videoRef.current.pause();
@@ -325,6 +327,7 @@ function App({ token }: { token: string | null }) {
       micRef.current = null;
     }
 
+    isUserSpeakingRef.current = false;
     setIsMicActive(false);
     setIsUserSpeaking(false);
 
@@ -336,14 +339,9 @@ function App({ token }: { token: string | null }) {
 
   useEffect(() => {
     return () => {
-      if (pollRef.current) {
-        window.clearInterval(pollRef.current);
-      }
-
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      if (wsRef.current) wsRef.current.close();
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
       void player.close();
       void micRef.current?.stop();
     };
@@ -372,7 +370,7 @@ function App({ token }: { token: string | null }) {
               </div>
               <div>
                 <h2 className="text-xl font-medium">Upload report</h2>
-                <p className="text-sm text-zinc-400">PDF only</p>
+                <p className="text-sm text-zinc-400">PDF only · max {MAX_PDF_PAGES} pages</p>
               </div>
             </div>
 
@@ -387,13 +385,14 @@ function App({ token }: { token: string | null }) {
                 accept="application/pdf"
                 className="hidden"
                 onChange={async (e) => {
+                  setFileError(null);
                   const selected = e.target.files?.[0] ?? null;
                   if (selected) {
                     const buf = await selected.arrayBuffer();
                     const text = new TextDecoder("latin1").decode(buf);
                     const pages = (text.match(/\/Type\s*\/Page[^s]/g) || []).length;
-                    if (pages > 50) {
-                      setStatusText(`PDF has ${pages} pages — limit is 50.`);
+                    if (pages > MAX_PDF_PAGES) {
+                      setFileError(`This PDF has ${pages} pages. The limit is ${MAX_PDF_PAGES}.`);
                       setFile(null);
                       e.target.value = "";
                       return;
@@ -404,7 +403,11 @@ function App({ token }: { token: string | null }) {
               />
             </label>
 
-            {file && (
+            {fileError && (
+              <p className="mt-3 text-sm text-red-400">{fileError}</p>
+            )}
+
+            {file && !fileError && (
               <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-300">
                 Selected: <span className="font-medium">{file.name}</span>
               </div>
@@ -423,18 +426,10 @@ function App({ token }: { token: string | null }) {
 
             <div className="mt-auto pt-8">
               <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-                Live Q&A controls
+                Live Q&A
               </h3>
 
               <div className="space-y-3">
-                <textarea
-                  value={sceneText}
-                  onChange={(e) => setSceneText(e.target.value)}
-                  rows={3}
-                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 p-3 text-sm outline-none ring-0"
-                  placeholder="Current scene text"
-                />
-
                 <textarea
                   value={question}
                   onChange={(e) => setQuestion(e.target.value)}
@@ -453,12 +448,12 @@ function App({ token }: { token: string | null }) {
                 </button>
 
                 <button
-                  onClick={sendSceneAndQuestion}
-                  disabled={!liveConnected}
+                  onClick={sendQuestion}
+                  disabled={!liveConnected || !question.trim()}
                   className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-sm font-medium hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Play className="h-4 w-4" />
-                  Send scene + question
+                  Send question
                 </button>
 
                 {!isMicActive ? (

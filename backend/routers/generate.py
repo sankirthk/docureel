@@ -37,8 +37,8 @@ async def generate(request: Request, file: UploadFile = File(...), background_ta
     data = await file.read()
 
     page_count = len(__import__("re").findall(rb"/Type\s*/Page[^s]", data))
-    if page_count > 50:
-        raise HTTPException(status_code=400, detail=f"PDF has {page_count} pages — limit is 50.")
+    if page_count > 20:
+        raise HTTPException(status_code=400, detail=f"PDF has {page_count} pages — limit is 20.")
 
     print(f"\n{'='*60}", flush=True)
     print(f"[generate] New job: {job_id}", flush=True)
