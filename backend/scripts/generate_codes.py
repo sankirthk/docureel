@@ -30,7 +30,7 @@ def _parse_duration(value: str) -> timedelta:
     return timedelta(hours=n) if m.group(2) == "h" else timedelta(days=n)
 
 
-def _random_code(length: int = 8) -> str:
+def _random_code(length: int = 12) -> str:
     alphabet = string.ascii_uppercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
