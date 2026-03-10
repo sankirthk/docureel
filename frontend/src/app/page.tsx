@@ -204,7 +204,7 @@ function App({ token }: { token: string | null }) {
     };
 
     void poll();
-    pollRef.current = window.setInterval(poll, 2000);
+    pollRef.current = window.setInterval(poll, 10000);
 
     return () => {
       if (pollRef.current) {
