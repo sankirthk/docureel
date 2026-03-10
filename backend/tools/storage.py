@@ -102,14 +102,28 @@ def get_uri(job_id: str, filename: str) -> str:
 
 
 def get_signed_url(gcs_uri: str) -> str:
-    """Return a signed HTTPS URL for a GCS object (prod only)."""
-    client = build_gcs_client()
-    # gcs_uri format: gs://bucket/path/to/file
+    """Return a signed HTTPS URL for a GCS object (prod only).
+    Uses token-based signing so it works on Cloud Run without a service account key.
+    Requires the Service Account Token Creator role on the default compute SA.
+    """
+    import datetime as dt
+    from google import auth
+    from google.cloud import storage as gcs_lib
+
+    credentials, _ = auth.default()
+    credentials.refresh(auth.transport.requests.Request())
+
+    client = gcs_lib.Client(credentials=credentials, project=os.getenv("GOOGLE_CLOUD_PROJECT"))
     without_prefix = gcs_uri.removeprefix("gs://")
     bucket_name, blob_path = without_prefix.split("/", 1)
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_path)
-    return blob.generate_signed_url(expiration=3600, method="GET", version="v4")
+    blob = client.bucket(bucket_name).blob(blob_path)
+    return blob.generate_signed_url(
+        expiration=dt.timedelta(hours=24),
+        method="GET",
+        version="v4",
+        service_account_email=credentials.service_account_email,
+        access_token=credentials.token,
+    )
 
 
 def _gcs_upload(job_id: str, filename: str, data: bytes) -> str:
