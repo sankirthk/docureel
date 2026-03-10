@@ -64,7 +64,16 @@ def _extract_json(text: str) -> dict:
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    return json.loads(text)
+    data = json.loads(text)
+    # Coerce list[dict] → list[str] for fields that expect strings.
+    # gemini-2.5-pro sometimes returns richer objects even when the prompt says strings.
+    for field in ("deep_findings", "key_facts", "risks_and_failures", "successes_and_rationale"):
+        if field in data and isinstance(data[field], list):
+            data[field] = [
+                " ".join(str(v) for v in item.values()) if isinstance(item, dict) else str(item)
+                for item in data[field]
+            ]
+    return data
 
 
 class KnowledgeBaseAgent(BaseAgent):
