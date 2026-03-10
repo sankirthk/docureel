@@ -29,6 +29,11 @@ POLL_INTERVAL = 15  # seconds between operation status checks
 # Raise to 3-4 if your project has higher quota; lower to 1 to avoid 429s.
 MAX_CONCURRENT_VEO = int(os.getenv("MAX_CONCURRENT_VEO", "2"))
 
+# Retry config for transient Veo errors (code 8 = resource exhausted / high load)
+VEO_MAX_RETRIES = int(os.getenv("VEO_MAX_RETRIES", "4"))
+VEO_RETRY_BASE_DELAY = float(os.getenv("VEO_RETRY_BASE_DELAY", "30"))  # seconds
+_VEO_RETRYABLE_CODES = {8}  # gRPC RESOURCE_EXHAUSTED
+
 
 def _load_avatar(path: str) -> types.Image | None:
     """Load avatar image bytes from local path or GCS URI. Returns None if missing."""
@@ -95,25 +100,44 @@ def _generate_clip(client, scene: dict, avatar_image: types.Image | None, job_id
 
     print(f"    [Veo] model={model}  aspect=9:16  duration={duration}s", flush=True)
     print(f"    [Veo] Prompt: {prompt[:120]!r}", flush=True)
-    print(f"    [Veo] Submitting...", flush=True)
-    operation = client.models.generate_videos(
-        model=model,
-        prompt=prompt,
-        config=config,
-    )
-    print(f"    [Veo] Operation started: {getattr(operation, 'name', '?')}", flush=True)
 
-    # Poll until the operation completes
-    poll_count = 0
-    while not operation.done:
-        time.sleep(POLL_INTERVAL)
-        poll_count += 1
-        operation = client.operations.get(operation)
-        print(f"    [Veo] Polling ({poll_count * POLL_INTERVAL}s elapsed) done={operation.done}", flush=True)
+    last_error = None
+    for attempt in range(VEO_MAX_RETRIES + 1):
+        if attempt > 0:
+            delay = VEO_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            print(f"    [Veo] Retry {attempt}/{VEO_MAX_RETRIES} for scene {scene['scene_id']} — waiting {delay:.0f}s...", flush=True)
+            time.sleep(delay)
 
-    if operation.error:
-        print(f"    [Veo] ❌ Generation error: {operation.error}", flush=True)
-        raise RuntimeError(f"Veo generation failed for scene {scene['scene_id']}: {operation.error}")
+        print(f"    [Veo] Submitting (attempt {attempt + 1})...", flush=True)
+        operation = client.models.generate_videos(
+            model=model,
+            prompt=prompt,
+            config=config,
+        )
+        print(f"    [Veo] Operation started: {getattr(operation, 'name', '?')}", flush=True)
+
+        # Poll until the operation completes
+        poll_count = 0
+        while not operation.done:
+            time.sleep(POLL_INTERVAL)
+            poll_count += 1
+            operation = client.operations.get(operation)
+            print(f"    [Veo] Polling ({poll_count * POLL_INTERVAL}s elapsed) done={operation.done}", flush=True)
+
+        if operation.error:
+            err = operation.error
+            err_code = err.get("code") if isinstance(err, dict) else getattr(err, "code", None)
+            print(f"    [Veo] ❌ Generation error (code={err_code}): {err}", flush=True)
+            if err_code in _VEO_RETRYABLE_CODES and attempt < VEO_MAX_RETRIES:
+                last_error = err
+                continue  # retry
+            raise RuntimeError(f"Veo generation failed for scene {scene['scene_id']}: {err}")
+
+        last_error = None
+        break  # success
+
+    if last_error is not None:
+        raise RuntimeError(f"Veo generation failed after {VEO_MAX_RETRIES} retries for scene {scene['scene_id']}: {last_error}")
 
     # Download the generated video bytes.
     generated_video = operation.result.generated_videos[0]
