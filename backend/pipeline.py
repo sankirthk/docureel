@@ -18,7 +18,7 @@ from tools.storage import (
     DEV_MODE,
 )
 
-APP_NAME = "nevertrtfm"
+APP_NAME = "docureel"
 
 
 def _ingestion_agent():
@@ -32,7 +32,7 @@ def _ingestion_agent():
 
 
 def _build_pipeline(agents: list) -> SequentialAgent:
-    return SequentialAgent(name="NeverRTFM", sub_agents=agents)
+    return SequentialAgent(name="DocuReel", sub_agents=agents)
 
 
 VALID_TONES = {"formal", "explanatory", "casual"}

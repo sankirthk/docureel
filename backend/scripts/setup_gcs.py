@@ -1,7 +1,7 @@
 """
 One-time GCS bucket setup script.
 
-Creates the nevertrtfm bucket with:
+Creates the docureel bucket with:
 - Regional storage in us-central1
 - Uniform bucket-level access
 - Folders for uploads, clips, final videos, and shared assets
@@ -18,7 +18,7 @@ load_dotenv()
 from google.cloud import storage
 
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
-BUCKET_NAME = os.getenv("GCS_BUCKET", "nevertrtfm")
+BUCKET_NAME = os.getenv("GCS_BUCKET", "docureel")
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 
 FOLDERS = [

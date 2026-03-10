@@ -34,8 +34,8 @@ function InviteGate({ onVerified }: { onVerified: (token: string | null) => void
       });
       const data = await res.json();
       if (data.valid) {
-        localStorage.setItem("nrtfm_verified", "1");
-        if (data.token) localStorage.setItem("nrtfm_token", data.token);
+        localStorage.setItem("docureel_verified", "1");
+        if (data.token) localStorage.setItem("docureel_token", data.token);
         onVerified(data.token ?? null);
       } else {
         setError(data.error ?? "Invalid invite code.");
@@ -50,7 +50,7 @@ function InviteGate({ onVerified }: { onVerified: (token: string | null) => void
   return (
     <main className="min-h-screen bg-black text-white flex items-center justify-center">
       <div className="w-full max-w-sm rounded-3xl border border-zinc-800 bg-zinc-950 p-8 shadow-2xl">
-        <h1 className="text-2xl font-semibold tracking-tight mb-1">NeverRTFM</h1>
+        <h1 className="text-2xl font-semibold tracking-tight mb-1">DocuReel</h1>
         <p className="text-sm text-zinc-400 mb-8">Enter your invite code to continue.</p>
         <form onSubmit={submit} className="space-y-4">
           <input
@@ -92,9 +92,9 @@ export default function Home() {
   const [token, setToken] = useState<string | null>(null);
 
   useEffect(() => {
-    const ok = localStorage.getItem("nrtfm_verified") === "1";
+    const ok = localStorage.getItem("docureel_verified") === "1";
     setVerified(ok);
-    if (ok) setToken(localStorage.getItem("nrtfm_token"));
+    if (ok) setToken(localStorage.getItem("docureel_token"));
   }, []);
 
   if (verified === null) return null;
@@ -354,7 +354,7 @@ function App({ token }: { token: string | null }) {
       <div className="mx-auto max-w-7xl px-6 py-8">
         <div className="mb-10 flex items-center justify-between">
           <div>
-            <h1 className="text-4xl font-semibold tracking-tight">NeverRTFM</h1>
+            <h1 className="text-4xl font-semibold tracking-tight">DocuReel</h1>
             <p className="mt-2 text-sm text-zinc-400">
               Upload any report. Get a short video. Ask questions live.
             </p>

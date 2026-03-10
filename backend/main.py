@@ -10,7 +10,7 @@ load_dotenv(override=True)
 from tools.limiter import limiter
 from routers import auth, generate, status, live
 
-app = FastAPI(title="NeverRTFM API", version="0.1.0")
+app = FastAPI(title="DocuReel API", version="0.1.0")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 

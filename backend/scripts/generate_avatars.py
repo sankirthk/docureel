@@ -12,8 +12,8 @@ After running:
   1. Review candidates in GCS or local_storage/shared/avatars/
   2. Pick the best of each gender
   3. Set in .env:
-       AVATAR_MALE_PATH=gs://nevertrtfm/shared/avatars/avatar_male.jpg
-       AVATAR_FEMALE_PATH=gs://nevertrtfm/shared/avatars/avatar_female.jpg
+       AVATAR_MALE_PATH=gs://docureel/shared/avatars/avatar_male.jpg
+       AVATAR_FEMALE_PATH=gs://docureel/shared/avatars/avatar_female.jpg
 """
 
 from dotenv import load_dotenv
@@ -79,7 +79,7 @@ def main():
     if DEV_MODE:
         print("  cp local_storage/shared/avatars/avatar_male_candidate_X.jpg local_storage/shared/avatars/avatar_male.jpg")
     else:
-        print("  gcloud storage cp gs://nevertrtfm/shared/avatars/avatar_male_candidate_X.jpg gs://nevertrtfm/shared/avatars/avatar_male.jpg")
+        print("  gcloud storage cp gs://docureel/shared/avatars/avatar_male_candidate_X.jpg gs://docureel/shared/avatars/avatar_male.jpg")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# NeverRTFM — Project & Agent Logic Flow
+# DocuReel — Project & Agent Logic Flow
 > Upload any report. Get a 30-60 second TikTok-style video. Ask questions live.
 
 ---
@@ -31,7 +31,7 @@ and the video resumes.
 ## Agent Pipeline
 
 ```
-SequentialAgent: "NeverRTFM"
+SequentialAgent: "DocuReel"
 │
 ├── [1] ParserAgent
 │         Gemini 2.0 Flash Vision
@@ -139,7 +139,7 @@ PARALLEL & ALWAYS ON:
 ### [3] TTSAgent → `session["tts_result"]`
 ```json
 {
-  "audio_gcs_uri": "gs://nevertrtfm/audio/session_abc.wav",
+  "audio_gcs_uri": "gs://docureel/audio/session_abc.wav",
   "duration_seconds": 43.2,
   "word_timestamps": [
     {"word": "Revenue",  "start": 1.1, "end": 1.5},
@@ -183,8 +183,8 @@ PARALLEL & ALWAYS ON:
 ```json
 {
   "clips": [
-    {"scene_id": 1, "gcs_uri": "gs://nevertrtfm/clips/scene1.mp4", "duration": 8.4},
-    {"scene_id": 2, "gcs_uri": "gs://nevertrtfm/clips/scene2.mp4", "duration": 7.7}
+    {"scene_id": 1, "gcs_uri": "gs://docureel/clips/scene1.mp4", "duration": 8.4},
+    {"scene_id": 2, "gcs_uri": "gs://docureel/clips/scene2.mp4", "duration": 7.7}
   ]
 }
 ```
@@ -216,7 +216,7 @@ ffmpeg command logic:
 
 ```json
 {
-  "final_video_uri": "https://storage.googleapis.com/nevertrtfm/final/session_abc.mp4",
+  "final_video_uri": "https://storage.googleapis.com/docureel/final/session_abc.mp4",
   "duration_seconds": 43.2,
   "format": "1080x1920 vertical MP4"
 }

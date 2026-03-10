@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**NeverRTFM** — Upload any PDF report, get a 30–60 second TikTok-style video summary, and ask live voice questions mid-playback. Built for the Gemini AI Hackathon.
+**DocuReel** — Upload any PDF report, get a 30–60 second TikTok-style video summary, and ask live voice questions mid-playback. Built for the Gemini AI Hackathon.
 
 ## Commands
 
@@ -26,15 +26,15 @@ Swagger docs at `http://localhost:8080/docs`.
 ### Docker
 
 ```bash
-docker build -t nevertrtfm .
-docker run -p 8080:8080 --env-file .env nevertrtfm
+docker build -t docureel .
+docker run -p 8080:8080 --env-file .env docureel
 ```
 
 ### GCP Deployment
 
 ```bash
 # Backend → Cloud Run
-gcloud run deploy nevertrtfm-api --source . --region us-central1 --allow-unauthenticated
+gcloud run deploy docureel-api --source . --region us-central1 --allow-unauthenticated
 ```
 
 ## Architecture

@@ -1,4 +1,4 @@
-# NeverRTFM
+# DocuReel
 
 > Upload any report. Get a 30–60 second TikTok-style video. Ask questions live.
 
@@ -64,7 +64,7 @@ GOOGLE_VERTEX_API_KEY=your-api-key          # Option A: API key (local dev)
 
 # ── Storage ───────────────────────────────────────────────
 DEV_MODE=true          # true = files saved locally under backend/local_storage/
-GCS_BUCKET=nevertrtfm  # only used when DEV_MODE=false
+GCS_BUCKET=docureel  # only used when DEV_MODE=false
 
 # ── Parser backend ────────────────────────────────────────
 PARSER_BACKEND=gemini  # "gemini" (default) or "documentai"
@@ -175,11 +175,11 @@ WS /api/live/{job_id}
 ```bash
 # Backend → Cloud Run
 cd backend
-gcloud run deploy nevertrtfm-api \
+gcloud run deploy docureel-api \
   --source . \
   --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars GOOGLE_CLOUD_PROJECT=your-project-id,DEV_MODE=false,GCS_BUCKET=nevertrtfm
+  --set-env-vars GOOGLE_CLOUD_PROJECT=your-project-id,DEV_MODE=false,GCS_BUCKET=docureel
 
 # Frontend → Firebase
 cd frontend

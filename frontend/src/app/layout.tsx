@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NeverRTFM",
+  title: "DocuReel",
   description: "Reports to Video + Live Q&A",
 };
 

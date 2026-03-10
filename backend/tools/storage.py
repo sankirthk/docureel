@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 DEV_MODE = os.getenv("DEV_MODE", "true").lower() == "true"
-GCS_BUCKET = os.getenv("GCS_BUCKET", "nevertrtfm")
+GCS_BUCKET = os.getenv("GCS_BUCKET", "docureel")
 
 LOCAL_ROOT = Path(__file__).parent.parent / "local_storage"
 

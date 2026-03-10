@@ -1,4 +1,4 @@
-# NeverRTFM
+# DocuReel
 > Upload any report. Get a 30-60 second TikTok-style video. Ask questions live.
 
 ---
@@ -7,7 +7,7 @@
 
 ```bash
 git clone <repo>
-cd nevertrtfm
+cd docureel
 
 # Copy env files
 cp backend/.env.example backend/.env
@@ -15,7 +15,7 @@ cp frontend/.env.local.example frontend/.env.local
 
 # Fill in your API keys in backend/.env
 ```
-nevertrtfm/
+docureel/
 ├── README.md                ← setup + API contract
 ├── backend/
 │   ├── main.py              ← FastAPI app
@@ -79,7 +79,7 @@ Frontend at `http://localhost:3000`
 ## Architecture
 
 ```
-SequentialAgent: NeverRTFM
+SequentialAgent: DocuReel
 ├── [1] ParserAgent          PDF → manifest           (Person 1)
 ├── [2] NarrativeScriptAgent manifest → script        (Person 1)
 ├── [3] TTSAgent             script → audio+timestamps (Person 2)
@@ -123,7 +123,7 @@ WS /api/live/{job_id}
 ```bash
 # Backend → Cloud Run
 cd backend
-gcloud run deploy nevertrtfm-api \
+gcloud run deploy docureel-api \
   --source . \
   --region us-central1 \
   --allow-unauthenticated
