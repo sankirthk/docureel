@@ -1,8 +1,9 @@
 """
-In-memory rate limiting helpers for limits that don't fit slowapi
-(WebSocket connections, global daily caps).
+Rate limiting helpers.
 
-Safe for single-instance Cloud Run (max-instances=1).
+Global daily generate cap uses Firestore so it survives cold starts.
+Auth lockout and WS limits are in-memory (acceptable with UUID invite codes
+since brute force is computationally impossible).
 """
 
 import os
@@ -14,28 +15,39 @@ from datetime import date, datetime, timedelta, timezone
 _lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
-# Global daily generate cap
+# Global daily generate cap — Firestore-backed (survives cold starts)
 # ---------------------------------------------------------------------------
-_DAILY_GENERATE_LIMIT = int(os.getenv("DAILY_GENERATE_LIMIT", "20"))
-_global_generate_date: date | None = None
-_global_generate_count: int = 0
+_DAILY_GENERATE_LIMIT = int(os.getenv("DAILY_GENERATE_LIMIT", "1"))
+_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
 
 
 def check_global_generate_limit() -> tuple[bool, int]:
     """
-    Returns (allowed, remaining).
-    Resets at UTC midnight.
+    Returns (allowed, remaining). Resets at UTC midnight.
+    Uses Firestore counter so the limit holds across cold starts.
+    Falls back to always-allowed in local dev (no GOOGLE_CLOUD_PROJECT).
     """
-    global _global_generate_date, _global_generate_count
-    today = datetime.now(timezone.utc).date()
-    with _lock:
-        if _global_generate_date != today:
-            _global_generate_date = today
-            _global_generate_count = 0
-        if _global_generate_count >= _DAILY_GENERATE_LIMIT:
+    if not _PROJECT:
+        return True, _DAILY_GENERATE_LIMIT  # local dev — no cap
+
+    from google.cloud import firestore
+
+    db = firestore.Client(project=_PROJECT)
+    today = datetime.now(timezone.utc).date().isoformat()  # e.g. "2026-03-11"
+    ref = db.collection("daily_limits").document(today)
+
+    @firestore.transactional
+    def _txn(transaction):
+        snap = ref.get(transaction=transaction)
+        count = snap.to_dict().get("count", 0) if snap.exists else 0
+        if count >= _DAILY_GENERATE_LIMIT:
             return False, 0
-        _global_generate_count += 1
-        return True, _DAILY_GENERATE_LIMIT - _global_generate_count
+        transaction.set(ref, {"count": count + 1}, merge=True)
+        return True, _DAILY_GENERATE_LIMIT - count - 1
+
+    result = _txn(db.transaction())
+    db.close()
+    return result
 
 
 # ---------------------------------------------------------------------------

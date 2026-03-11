@@ -11,8 +11,7 @@ Reads GOOGLE_CLOUD_PROJECT from the environment (or .env in the repo root).
 import argparse
 import os
 import re
-import secrets
-import string
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -30,9 +29,8 @@ def _parse_duration(value: str) -> timedelta:
     return timedelta(hours=n) if m.group(2) == "h" else timedelta(days=n)
 
 
-def _random_code(length: int = 12) -> str:
-    alphabet = string.ascii_uppercase + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+def _random_code() -> str:
+    return str(uuid.uuid4())
 
 
 def main():
