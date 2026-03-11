@@ -1,0 +1,39 @@
+# Cloud Run service configuration for DocuReel API
+# Deploy with: gcloud run services replace backend/service.yaml --region us-central1
+#
+# Key settings:
+#   minScale: 1      — always one warm instance for WebSocket connections
+#   maxScale: 5      — cap to control costs
+#   timeoutSeconds: 1800  — 30 min to accommodate Cloud Tasks pipeline calls
+#   cpu: "2"         — enough for concurrent ffmpeg + Veo polling
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: docureel-api
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "5"
+        run.googleapis.com/cpu-throttling: "false"
+    spec:
+      timeoutSeconds: 1800
+      containers:
+        - image: gcr.io/PROJECT_ID/docureel-api
+          resources:
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          env:
+            - name: GOOGLE_CLOUD_PROJECT
+              value: PROJECT_ID
+            - name: GOOGLE_CLOUD_LOCATION
+              value: us-central1
+            - name: GCS_BUCKET
+              value: docureel
+            - name: DEV_MODE
+              value: "false"

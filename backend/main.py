@@ -8,7 +8,7 @@ import os
 load_dotenv(override=True)
 
 from tools.limiter import limiter
-from routers import auth, generate, status, live
+from routers import auth, generate, status, live, worker
 
 app = FastAPI(title="DocuReel API", version="0.1.0")
 app.state.limiter = limiter
@@ -34,6 +34,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(generate.router, prefix="/api")
 app.include_router(status.router, prefix="/api")
 app.include_router(live.router, prefix="/api")
+app.include_router(worker.router)  # no prefix — /internal/run-pipeline
 
 @app.get("/health")
 async def health():

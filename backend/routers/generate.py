@@ -1,12 +1,8 @@
 """
 POST /api/generate
-
-Accepts a PDF upload, saves it, creates a job, and fires the pipeline
-as a FastAPI background task.
-
-Returns: { job_id: str, status: "processing" }
 """
 
+import hashlib
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
@@ -50,8 +46,10 @@ async def generate(
     if page_count > 20:
         raise HTTPException(status_code=400, detail=f"PDF has {page_count} pages — limit is 20.")
 
+    pdf_hash = hashlib.sha256(data).hexdigest()
+
     print(f"\n{'='*60}", flush=True)
-    print(f"[generate] New job: {job_id}  tone={tone!r}", flush=True)
+    print(f"[generate] New job: {job_id}  tone={tone!r}  pdf_hash={pdf_hash[:16]}...", flush=True)
     print(f"[generate] File: {file.filename!r}  size: {len(data):,} bytes  pages: {page_count}", flush=True)
 
     file_path = save_upload(job_id, file.filename or "upload.pdf", data)
@@ -59,7 +57,12 @@ async def generate(
     create_job(job_id)
 
     from pipeline import run_pipeline
-    background_tasks.add_task(run_pipeline, job_id, file_path, data, tone)
-    print(f"[generate] Pipeline queued as background task", flush=True)
+    from tools.tasks import enqueue_pipeline
 
+    if not enqueue_pipeline(job_id, file_path, pdf_hash, tone):
+        # Local dev fallback — no Cloud Tasks configured
+        print(f"[generate] Cloud Tasks not configured — using background task", flush=True)
+        background_tasks.add_task(run_pipeline, job_id, file_path, pdf_hash, tone)
+
+    print(f"[generate] Pipeline queued", flush=True)
     return {"job_id": job_id, "status": "processing", "tone": tone}

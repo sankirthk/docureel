@@ -1,4 +1,3 @@
-import hashlib
 import traceback
 
 from google.adk.agents import SequentialAgent, ParallelAgent
@@ -37,7 +36,7 @@ def _build_pipeline(agents: list) -> SequentialAgent:
 VALID_TONES = {"formal", "explanatory", "casual"}
 
 
-async def run_pipeline(job_id: str, file_path: str, pdf_bytes: bytes, tone: str = "explanatory"):
+async def run_pipeline(job_id: str, file_path: str, pdf_hash: str, tone: str = "explanatory"):
     """
     Smart resumption pipeline. Checks what already exists for this PDF
     (by content hash) and only runs what's missing:
@@ -50,7 +49,6 @@ async def run_pipeline(job_id: str, file_path: str, pdf_bytes: bytes, tone: str 
     """
     try:
         tone = tone if tone in VALID_TONES else "explanatory"
-        pdf_hash = hashlib.sha256(pdf_bytes).hexdigest()
         print(f"\n[pipeline] ▶ job={job_id}  pdf_hash={pdf_hash[:16]}...  tone={tone!r}", flush=True)
         update_job(job_id, status="processing", step="checking_cache")
 

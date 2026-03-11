@@ -18,6 +18,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "PyJWT>=2.8.0",
     "google-cloud-firestore>=2.16.0",
+    "google-cloud-tasks>=2.16.0",
 ]
 
 [build-system]

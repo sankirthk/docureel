@@ -195,3 +195,30 @@ def get_hash_uri(pdf_hash: str, rel_path: str) -> str:
         return str(CACHE_ROOT / pdf_hash / rel_path)
     else:
         return f"gs://{GCS_BUCKET}/cache/{pdf_hash}/{rel_path}"
+
+
+def copy_gcs_to_cache(src_uri: str, pdf_hash: str, rel_path: str) -> str:
+    """
+    Server-side GCS copy from src_uri to cache/{pdf_hash}/{rel_path}.
+    No data passes through Cloud Run — stays within GCS.
+    Falls back to download+save in DEV_MODE (different storage backends).
+    """
+    dest_rel = f"cache/{pdf_hash}/{rel_path}"
+
+    if DEV_MODE:
+        # In dev, destination is local — must download
+        client = build_gcs_client()
+        without_prefix = src_uri.removeprefix("gs://")
+        bucket_name, blob_path = without_prefix.split("/", 1)
+        data = client.bucket(bucket_name).blob(blob_path).download_as_bytes()
+        dest = CACHE_ROOT / pdf_hash / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        return str(dest)
+
+    client = build_gcs_client()
+    src_bucket_name, src_blob_path = src_uri.removeprefix("gs://").split("/", 1)
+    src_blob = client.bucket(src_bucket_name).blob(src_blob_path)
+    dest_bucket = client.bucket(GCS_BUCKET)
+    client.bucket(src_bucket_name).copy_blob(src_blob, dest_bucket, dest_rel)
+    return f"gs://{GCS_BUCKET}/{dest_rel}"
