@@ -14,8 +14,7 @@ from agents.stitcher import StitcherAgent
 from tools.job_store import update_job, get_job
 from tools.storage import (
     load_cache,
-    hash_file_exists, get_hash_uri, get_signed_url,
-    DEV_MODE,
+    hash_file_exists, get_hash_uri,
 )
 
 APP_NAME = "docureel"
@@ -58,8 +57,6 @@ async def run_pipeline(job_id: str, file_path: str, pdf_bytes: bytes, tone: str 
         # ── 1. Final video already exists? ────────────────────────────────────
         if hash_file_exists(pdf_hash, f"final_{tone}.mp4"):
             final_uri = get_hash_uri(pdf_hash, f"final_{tone}.mp4")
-            if not DEV_MODE and final_uri.startswith("gs://"):
-                final_uri = get_signed_url(final_uri)
             print(f"[pipeline] ⚡ Final video cached — done instantly: {final_uri}", flush=True)
             update_job(
                 job_id, status="done", step="complete",
@@ -183,9 +180,6 @@ async def run_pipeline(job_id: str, file_path: str, pdf_bytes: bytes, tone: str 
         state = final_session.state
 
         final_uri = state.get("final_video_uri") or (get_job(job_id) or {}).get("final_video_uri")
-
-        if final_uri and not DEV_MODE and final_uri.startswith("gs://"):
-            final_uri = get_signed_url(final_uri)
 
         print(f"\n[pipeline] ✅ Complete — final_uri: {final_uri}", flush=True)
         update_job(

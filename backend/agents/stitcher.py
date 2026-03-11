@@ -24,7 +24,7 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
 
-from tools.storage import save_hash_from_path, get_signed_url, DEV_MODE, build_gcs_client
+from tools.storage import save_hash_from_path, DEV_MODE, build_gcs_client
 from tools.job_store import update_job
 
 
@@ -102,10 +102,8 @@ class StitcherAgent(BaseAgent):
 
         final_uri = await asyncio.to_thread(_stitch, clips, pdf_hash, tone)
 
-        # In prod, return a signed URL so the frontend can stream directly from GCS
-        if not DEV_MODE and final_uri.startswith("gs://"):
-            final_uri = get_signed_url(final_uri)
-
+        # Store the raw gs:// URI — signing happens in the status endpoint
+        # on every request so the URL never expires.
         print(f"[StitcherAgent] ✅ Done — final_uri: {final_uri}", flush=True)
         ctx.session.state["final_video_uri"] = final_uri
         update_job(job_id, step="complete", final_video_uri=final_uri)

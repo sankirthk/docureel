@@ -1,32 +1,36 @@
 """
 GET /api/status/{job_id}  → { status, step, video_url }
-GET /api/video/{job_id}   → FileResponse (DEV_MODE) or redirect (prod signed URL)
+GET /api/video/{job_id}   → FileResponse (DEV_MODE only)
 
-In DEV_MODE the stitcher saves final.mp4 as a local path. The status endpoint
-rewrites that to /api/video/{job_id} so the browser has an actual HTTP URL.
-In prod the stitcher stores a signed GCS URL which is returned as-is.
+video_url is always a fresh signed GCS URL generated on every status call
+so it never expires from the user's perspective. The gs:// URI is what gets
+stored in Firestore — signing happens here, not in the pipeline.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse
 
 from tools.auth import require_token
 from tools.limiter import limiter
 from tools.job_store import get_job
-from tools.storage import DEV_MODE
+from tools.storage import DEV_MODE, get_signed_url
 
 router = APIRouter()
 
 
 def _resolve_video_url(job_id: str, raw_url: str | None) -> str | None:
-    """Return a browser-accessible URL for the final video."""
+    """Return a browser-accessible URL for the final video.
+
+    prod: raw_url is gs:// — sign fresh on every call so it never expires.
+    dev:  raw_url is a local path — serve via /api/video/{job_id}.
+    """
     if not raw_url:
         return None
-    if raw_url.startswith("http"):
-        return raw_url          # signed GCS URL — already usable
     if raw_url.startswith("gs://"):
-        return None             # unsigned GCS URI — shouldn't happen in prod
-    # Local filesystem path (DEV_MODE) — serve via /api/video/{job_id}
+        return get_signed_url(raw_url)
+    if raw_url.startswith("http"):
+        return raw_url  # already a URL (legacy / fallback)
+    # Local filesystem path (DEV_MODE)
     return f"http://127.0.0.1:8080/api/video/{job_id}"
 
 
