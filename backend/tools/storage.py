@@ -152,6 +152,28 @@ def save_hash_bytes(pdf_hash: str, rel_path: str, data: bytes) -> str:
         return f"gs://{GCS_BUCKET}/{blob_path}"
 
 
+def save_hash_from_path(pdf_hash: str, rel_path: str, src: "Path") -> str:
+    """
+    Upload a file by path to cache/{pdf_hash}/{rel_path}. Returns a URI.
+    Prefer this over save_hash_bytes for large files (video) — GCS uses
+    resumable chunked upload automatically, avoiding multipart size limits
+    and loading the entire file into memory.
+    """
+    from pathlib import Path as _Path
+    blob_dest = f"cache/{pdf_hash}/{rel_path}"
+    if DEV_MODE:
+        dest = CACHE_ROOT / pdf_hash / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        import shutil as _shutil
+        _shutil.copy2(src, dest)
+        return str(dest)
+    else:
+        client = build_gcs_client()
+        blob = client.bucket(GCS_BUCKET).blob(blob_dest)
+        blob.upload_from_filename(str(src), content_type="video/mp4")
+        return f"gs://{GCS_BUCKET}/{blob_dest}"
+
+
 def hash_file_exists(pdf_hash: str, rel_path: str) -> bool:
     """Return True if cache/{pdf_hash}/{rel_path} exists."""
     if DEV_MODE:

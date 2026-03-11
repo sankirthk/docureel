@@ -10,6 +10,7 @@
 
 import asyncio
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import AsyncGenerator
@@ -20,7 +21,7 @@ from google.adk.events import Event
 from google.genai import types
 
 from tools.gemini import build_veo_client, VEO_MODEL, VEO_FAST_MODEL
-from tools.storage import save_hash_bytes, build_gcs_client
+from tools.storage import save_hash_from_path, build_gcs_client
 from tools.job_store import update_job
 
 POLL_INTERVAL = 15  # seconds between operation status checks
@@ -139,7 +140,8 @@ def _generate_clip(client, scene: dict, avatar_image: types.Image | None, job_id
     if last_error is not None:
         raise RuntimeError(f"Veo generation failed after {VEO_MAX_RETRIES} retries for scene {scene['scene_id']}: {last_error}")
 
-    # Download the generated video bytes.
+    # Download the generated video directly to a temp file — avoids loading
+    # large video bytes into memory before the GCS upload.
     generated_video = operation.result.generated_videos[0]
     video = generated_video.video
 
@@ -147,14 +149,20 @@ def _generate_clip(client, scene: dict, avatar_image: types.Image | None, job_id
     video_bytes_inline = getattr(video, "video_bytes", None) if video else None
     print(f"    [Veo] uri={video_uri!r}  video_bytes={'len=' + str(len(video_bytes_inline)) if video_bytes_inline else None}", flush=True)
 
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
     if video_uri:
         gcs = build_gcs_client()
         without_prefix = video_uri.removeprefix("gs://")
         bucket_name, blob_path = without_prefix.split("/", 1)
-        return gcs.bucket(bucket_name).blob(blob_path).download_as_bytes()
+        gcs.bucket(bucket_name).blob(blob_path).download_to_filename(str(tmp_path))
+        return tmp_path
 
     if video_bytes_inline:
-        return bytes(video_bytes_inline)
+        tmp_path.write_bytes(bytes(video_bytes_inline))
+        return tmp_path
 
     raise RuntimeError(f"Veo returned no URI and no video_bytes for scene {scene['scene_id']}. Raw video obj: {video}")
 
@@ -193,10 +201,13 @@ class VeoAgent(BaseAgent):
 
             async with semaphore:
                 print(f"[VeoAgent]   scene {scene_id} → slot acquired, submitting to Veo", flush=True)
-                video_bytes = await asyncio.to_thread(_generate_clip, client, scene, avatar_img, job_id)
+                tmp_path = await asyncio.to_thread(_generate_clip, client, scene, avatar_img, job_id)
 
-            print(f"[VeoAgent]   scene {scene_id} ✅ {len(video_bytes):,} bytes", flush=True)
-            clip_path = save_hash_bytes(pdf_hash, f"clips_{tone}/clip_{scene_id:02d}.mp4", video_bytes)
+            print(f"[VeoAgent]   scene {scene_id} ✅ {tmp_path.stat().st_size:,} bytes", flush=True)
+            try:
+                clip_path = save_hash_from_path(pdf_hash, f"clips_{tone}/clip_{scene_id:02d}.mp4", tmp_path)
+            finally:
+                tmp_path.unlink(missing_ok=True)
             return {
                 "scene_id": scene_id,
                 "clip_path": clip_path,

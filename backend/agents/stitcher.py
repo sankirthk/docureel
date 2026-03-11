@@ -24,7 +24,7 @@ from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
 from google.genai import types
 
-from tools.storage import save_hash_bytes, get_signed_url, DEV_MODE, build_gcs_client
+from tools.storage import save_hash_from_path, get_signed_url, DEV_MODE, build_gcs_client
 from tools.job_store import update_job
 
 
@@ -81,9 +81,8 @@ def _stitch(clips: list[dict], pdf_hash: str, tone: str = "explanatory") -> str:
         _concat_clips(clip_paths, final_path)
         print(f"  [StitcherAgent] Concatenated → {final_path} ({final_path.stat().st_size:,} bytes)", flush=True)
 
-        # Step 3: save to content-addressed cache path (tone-scoped)
-        final_bytes = final_path.read_bytes()
-        uri = save_hash_bytes(pdf_hash, f"final_{tone}.mp4", final_bytes)
+        # Step 3: upload directly from file — avoids loading entire video into memory
+        uri = save_hash_from_path(pdf_hash, f"final_{tone}.mp4", final_path)
         print(f"  [StitcherAgent] Saved → {uri}", flush=True)
 
         return uri
