@@ -253,6 +253,7 @@ function App({ token }: { token: string | null }) {
       // the user explicitly clicks "End turn".
 
       if (msg.type === "audio") {
+        console.log("[live] audio chunk received, isUserSpeaking=", isUserSpeakingRef.current);
         if (!isUserSpeakingRef.current) {
           setIsAgentSpeaking(true);
           void player.playChunk(msg.data_b64);

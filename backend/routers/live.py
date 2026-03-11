@@ -265,6 +265,7 @@ async def live(websocket: WebSocket, job_id: str, token: str = ""):
                                 # On first audio chunk of a turn, pause the video
                                 if first_audio_in_turn:
                                     first_audio_in_turn = False
+                                    print(f"[live] 🔊 First audio chunk of turn #{turn_count} ({len(audio_bytes)} bytes) → sending to client", flush=True)
                                     await websocket.send_json({"type": "pause_video"})
 
                                 # Encode PCM bytes as base64 and send as JSON
@@ -273,6 +274,9 @@ async def live(websocket: WebSocket, job_id: str, token: str = ""):
                                     "type": "audio",
                                     "data_b64": b64,
                                 })
+                            else:
+                                if msg_count <= 5 or msg_count % 10 == 0:
+                                    print(f"[live] msg #{msg_count}: no audio_bytes (data={type(getattr(msg, 'data', None)).__name__}, server_content={msg.server_content is not None})", flush=True)
 
                 except WebSocketDisconnect:
                     print("[live] send_to_client: WebSocketDisconnect", flush=True)
